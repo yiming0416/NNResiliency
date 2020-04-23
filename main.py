@@ -26,7 +26,7 @@ import xlwt
 
 parser = argparse.ArgumentParser(description='HA-SGD Training',
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-parser.add_argument('--lr', default=0.1, type=float, help='learning_rate')
+parser.add_argument('--lr', default=0.01, type=float, help='learning_rate')
 parser.add_argument('--num_epochs', '-n', default=200, type=int, help='num_epochs')
 parser.add_argument('--epochs_lr_decay', '-a', default=60, type=int, help='epochs_for_lr_decay')
 parser.add_argument('--lr_decay_rate', default=0.2, type=float, help='lr_decay_rate')
@@ -69,7 +69,9 @@ if __name__ != "__main__":
 args = parser.parse_args()
 
 test_std_list = [0.0, 0.02, 0.04, 0.06, 0.08, 0.1, 0.12, 0.14, 0.16, 0.18, 0.2]
-test_mean_list = [-0.005, -0.0004, -0.0003, -0.0002, -0.0001, 0, 0.0001, 0.0002, 0.0003, 0.0004, 0.0005]
+test_mean_list = [-0.04, -0.02, -0.01, -0.005, 0.0, 0.005, 0.01, 0.02, 0.04]
+test_mean_pos = [0.0, 0.005, 0.01, 0.02, 0.04]
+test_mean_neg = [-0.04, -0.02, -0.01, -0.005, 0.0]
 
 # Set random seeds
 random.seed(args.seed)
@@ -217,16 +219,13 @@ def train(net, epoch, optimizer, perturbation_level=None, tensorboard_writer=Non
 
 def test(net, epoch, test_std, test_mean, tensorboard_writer=None):
     net.eval()
-    #if perturbation_level is None:
-    #    perturbation_level = args.testing_noise
     if isinstance(net, nn.DataParallel):
         net.module.set_sigma_list(test_std)
         net.module.set_mu_list(test_mean)
     else:
         net.set_sigma_list(test_std)
         net.set_mu_list(test_mean)
-    if args.testOnly:
-        net.apply(set_fixtest)
+    net.apply(set_fixtest)
 
     test_loss, acc, acc5 = AverageMeter(), AverageMeter(), AverageMeter()
     with torch.no_grad():
@@ -245,7 +244,7 @@ def test(net, epoch, test_std, test_mean, tensorboard_writer=None):
     return acc.avg, acc5.avg
 
 
-def save_model(net, save_point, args, stats_dict: dict=None):
+def save_model(net, save_point, args, metric = 1, stats_dict: dict=None):
     state = {
             'state_dict': net.state_dict(),
             'args': args
@@ -256,7 +255,10 @@ def save_model(net, save_point, args, stats_dict: dict=None):
         os.mkdir('checkpoint')
     if not os.path.isdir(save_point):
         os.mkdir(save_point)
-    save_file = os.path.join(save_point, file_name + ".pkl")
+    if metric==1:
+        save_file = os.path.join(save_point, file_name + "_metric1.pkl")
+    else:
+        save_file = os.path.join(save_point, file_name + "_metric2.pkl")
     torch.save(state, save_file)
     print(f'| Saved Best model to \n{save_file}\nstats = {stats_dict}')
 
@@ -272,7 +274,7 @@ if args.testOnly:
     if args.load_model:
         checkpoint_file = args.load_model
     else:
-        checkpoint_file = './checkpoint/'+args.dataset+'/'+args.training_noise_type+'/'+file_name + '.pkl'
+        checkpoint_file = './checkpoint/'+args.dataset+'/'+args.training_noise_type+'/'+file_name + '_metric1.pkl'
     checkpoint = torch.load(checkpoint_file)
     samples = 20
 
@@ -293,15 +295,15 @@ if args.testOnly:
             net.eval()
             net.apply(set_noisy)
             test_acc, test_acc_5 = test(net, 0, args.training_noise, test_mean)
-            test_acc_all[str(test_mean)].append(test_acc)
-            test_acc_5_all[str(test_mean)].append(test_acc_5)
+            test_acc_all[str(test_mean)].append(test_acc.cpu().item())
+            test_acc_5_all[str(test_mean)].append(test_acc_5.cpu().item())
             acc_avg += test_acc/samples
             acc_5_avg += test_acc_5/samples
 
-        test_acc_avg.append(acc_avg)
-        test_acc_5_avg.append(acc_5_avg)
+        test_acc_avg.append(acc_avg.cpu().item())
+        test_acc_5_avg.append(acc_5_avg.cpu().item())
 
-    with open(os.path.join('test', file_name + '.test'), 'a') as f:
+    with open(os.path.join('test', file_name + '_metric1.test'), 'a') as f:
         f.write('\n')
         json.dump({
             "args": vars(args),
@@ -333,7 +335,8 @@ if args.tensorboard:
     print("| Tensorboard record: " + log_identifier)
     writer.add_text("run-args", args.__repr__(), global_step=None, walltime=None)
 
-best_acc = 0
+best_acc_1 = 0
+best_acc_2 = 0
 elapsed_time = 0
 save_point = os.path.join('checkpoint', args.dataset, args.training_noise_type)
 
@@ -354,11 +357,9 @@ for epoch in range(start_epoch, start_epoch+num_epochs):
         # clean test
         net.apply(set_clean)
         test_acc, test_acc_5 = test(net, epoch, tensorboard_writer=writer)
-
         if args.tensorboard:
             writer.add_scalar("clean_test_acc", test_acc, global_step=(epoch+1)*len(trainloader))
             writer.add_scalar("clean_test_top5_acc", test_acc_5, global_step=(epoch+1)*len(trainloader))
-
         # noisy test
         net.apply(set_noisy)
         test_acc, test_acc_5 = test(net, epoch, tensorboard_writer=writer)
@@ -367,35 +368,57 @@ for epoch in range(start_epoch, start_epoch+num_epochs):
             writer.add_scalar("noisy_test_top5_acc", test_acc_5, global_step=(epoch+1)*len(trainloader))
     '''
     
-    test_acc_list = []
+    test_acc_dict = {}
+    net_test, _, = getNetwork(args, num_classes=num_classes)
+    net_test.load_state_dict(net.state_dict())
+    net_test.to(device)
     if args.test_with_std:
         for test_std in test_std_list:
             print('\n test noise std:{}'.format(test_std))
             print('test noise mean:{}'.format(args.training_noise_mean))
-            net.apply(set_noisy)
-            test_acc, test_acc_5 = test(net, epoch, test_std, args.training_noise_mean, writer)
-            test_acc_list.append(test_acc)
+            net_test.apply(set_noisy)
+            test_acc, test_acc_5 = test(net_test, epoch, test_std, args.training_noise_mean, writer)
+            test_acc_dict[test_std] = test_acc
             if args.tensorboard:
                 writer.add_scalar(f"test_acc/{test_std}", test_acc, global_step=(epoch+1)*len(trainloader))
                 writer.add_scalar(f"test_top5_acc/{test_std}", test_acc_5, global_step=(epoch+1)*len(trainloader))
-        test_acc_mean = 1 / np.sum(1/np.array(test_acc_list))
 
     elif args.test_with_mean:
         for test_mean in test_mean_list:
             print('\n test noise std:{}'.format(args.training_noise))
             print('test noise mean:{}'.format(test_mean))
 
-            net.apply(set_noisy)
-            test_acc, test_acc_5 = test(net, epoch, args.training_noise, test_mean, writer)
-            test_acc_list.append(test_acc)
+            net_test.apply(set_noisy)
+            test_acc, test_acc_5 = test(net_test, epoch, args.training_noise, test_mean, writer)
+            test_acc_dict[test_mean] = test_acc
             if args.tensorboard:
                 writer.add_scalar(f"test_acc/{test_mean}", test_acc, global_step=(epoch+1)*len(trainloader))
                 writer.add_scalar(f"test_top5_acc/{test_mean}", test_acc_5, global_step=(epoch+1)*len(trainloader))
-        test_acc_mean = 1 / np.sum(1/np.array(test_acc_list))
+            
+        if args.training_noise_mean is not None:
+            best_metric_1 = test_acc_dict[args.training_noise_mean[0]]
+        else:
+            best_metric_1 = test_acc_dict[0.0]
+        
+        if args.training_noise_mean is not None:       
+            if args.training_noise_mean[0] > 0:
+                best_metric_2 = sum(test_acc_dict[i] for i in test_mean_pos) / len(test_mean_pos)
+            elif args.training_noise_mean[0] < 0:
+                best_metric_2 = sum(test_acc_dict[i] for i in test_mean_neg) / len(test_mean_neg)
+        else:
+            best_metric_2 = test_acc_dict[0.0]
+    
 
-    if test_acc_mean > best_acc:
-        save_model(net, save_point, args, {"acc": test_acc_mean, "epoch": epoch})
-        best_acc = test_acc_mean
+    if best_metric_1 > best_acc_1:
+        print (best_metric_1)
+        save_model(net, save_point, args, 1, {"acc": best_metric_1, "epoch": epoch})
+        best_acc_1 = best_metric_1
+
+    if best_metric_2 > best_acc_2:
+        print (best_metric_2)
+        save_model(net, save_point, args, 2, {"acc": best_metric_2, "epoch": epoch})
+        best_acc_2 = best_metric_2
+
     epoch_time = time.time() - start_time
     elapsed_time += epoch_time
     print('| Elapsed time : %d:%02d:%02d'  %(cf.get_hms(elapsed_time)))
@@ -404,6 +427,5 @@ for epoch in range(start_epoch, start_epoch+num_epochs):
 
 
 print('\n[Phase 4] : Testing model')
-print('* Test results : Acc@1 = {:.2%}'.format(best_acc))
-
-
+print('* Test results : Acc@1 = {:.2%}'.format(best_acc_1))
+print('* Test results : Acc@1 = {:.2%}'.format(best_acc_2))

@@ -173,7 +173,7 @@ class ResNet(nn.Module):
         noisy_conv_list = list(children_of_class(self, NoisyConv2d))
 
         if sigma_list is None:
-            conv_sigma_list = [sigma_list] * len(noisy_conv_list)
+            conv_sigma_list = [0] * len(noisy_conv_list)
         else:
             try:
                 conv_sigma_list = float(sigma_list)
@@ -191,7 +191,7 @@ class ResNet(nn.Module):
         noisy_fc_list = list(children_of_class(self, NoisyLinear))
 
         if sigma_list is None:
-            fc_sigma_list = [sigma_list] * len(noisy_fc_list)
+            fc_sigma_list = [0] * len(noisy_fc_list)
         else:
             try:
                 fc_sigma_list = float(sigma_list)
@@ -209,7 +209,7 @@ class ResNet(nn.Module):
         noisy_id_list = list(children_of_class(self, NoisyIdentity))
         
         if sigma_list is None:
-            id_sigma_list = [sigma_list] * len(noisy_id_list)
+            id_sigma_list = [0] * len(noisy_id_list)
         else:
             try:
                 id_sigma_list = float(sigma_list)
@@ -227,7 +227,7 @@ class ResNet(nn.Module):
         noisy_bn_list = list(children_of_class(self, NoisyBN))
 
         if sigma_list is None:
-            bn_sigma_list = [sigma_list] * len(noisy_bn_list)
+            bn_sigma_list = [0] * len(noisy_bn_list)
         else:
             try:
                 bn_sigma_list = float(sigma_list)

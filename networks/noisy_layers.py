@@ -5,7 +5,6 @@ import numpy as np
 from typing import Callable
 from cached_property import cached_property_with_ttl
 
-
 # TODO: maybe NoisyModule is more generic?
 class NoisyLayer(nn.Module):
     noisy = True
@@ -70,7 +69,8 @@ class NoisyLayer(nn.Module):
             perturbation = self.get_perturbation()
             self.apply_perturbation(**perturbation)
 
-    @cached_property_with_ttl(ttl=30)
+    #@cached_property_with_ttl(ttl=0)
+    @property
     def perturbation_stdev_dict(self) -> dict:
         epsilon = 1e-8
         stdev_dict = {}
@@ -221,9 +221,21 @@ class NoisyBN(NoisyLayer, nn.modules.batchnorm._BatchNorm):
     def __init__(self, num_features, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True, mu=0, sigma=1, use_range=True, match_range=True):
         self.mu = mu
         self.sigma = sigma
-        self.channels = num_features
+        self.num_features = num_features        
         # TODO: add noise to running_mean & running_var
         super(NoisyBN, self).__init__(num_features, eps, momentum, affine, track_running_stats, use_range=use_range, match_range=match_range)
+        b_eff = torch.zeros(num_features)
+        w_eff = torch.zeros(num_features, 1, 1, 1)
+        if not hasattr(self, "b_eff"):
+            self.register_buffer("b_eff", b_eff)
+        else:
+            self.b_eff = b_eff
+        if not hasattr(self, "w_eff"):
+            self.register_buffer("w_eff", w_eff)
+        else:
+            self.w_eff = w_eff
+        self.parameters_to_match   = ["b_eff", "w_eff"]
+        self.parameters_to_perturb = ["b_eff", "w_eff"]
 
     @property
     def fixtest_flag(self):
@@ -232,9 +244,6 @@ class NoisyBN(NoisyLayer, nn.modules.batchnorm._BatchNorm):
     def fixtest_flag(self, fixtest_flag: bool):
         self._fixtest_flag = fixtest_flag
         if self._fixtest_flag:
-            self.parameters_to_match = ["b_eff", "w_eff"]
-            self.parameters_to_perturb = ["b_eff", "w_eff"]
-
             b_eff = self.bias - (self.running_mean * self.weight) / torch.sqrt(self.running_var + self.eps)
             w_eff = (self.weight / torch.sqrt(self.running_var + self.eps)).view(self.num_features,1,1,1)
             if not hasattr(self, "b_eff"):
@@ -246,23 +255,25 @@ class NoisyBN(NoisyLayer, nn.modules.batchnorm._BatchNorm):
             else:
                 self.w_eff = w_eff
             self.apply_perturbation(**self.get_perturbation())
-        else:
-            self.parameters_to_match   = ["bias", "weight"]
-            self.parameters_to_perturb = ["bias", "weight"]
-
+     
     def forward(self, input):
-        if self.noisy and (self.sigma or self.mu) and (not self.fixtest_flag) and self.training:
-            perturbation_dict = self.get_perturbation()
-            perturbed_weight = self.weight + perturbation_dict["weight"] if self.weight is not None else None
-            perturbed_bias = self.bias + perturbation_dict["bias"] if self.bias is not None else None
-
-            return F.batch_norm(input, self.running_mean, self.running_var, perturbed_weight, perturbed_bias, self.training, self.momentum, self.eps)
-
-        elif self.noisy and (self.sigma or self.mu) and self.fixtest_flag and (not self.training):
-            return F.conv2d(input, self.w_eff, self.b_eff, stride=1, groups=self.num_features)
+        #if self.noisy and (self.sigma or self.mu) and (not self.fixtest_flag) and self.training:
+        if not self.fixtest_flag: 
+            bn_mean = input.mean(axis=(0,2,3))
+            bn_var = input.var(axis=(0,2,3), unbiased=False)
+            bn_weight, bn_bias = self.weight.detach(), self.bias.detach()
+            self.b_eff = self.bias - (bn_mean * self.weight) / torch.sqrt(bn_var + self.eps)
+            self.w_eff = (self.weight / torch.sqrt(bn_var + self.eps)).view(self.num_features,1,1,1)
+            if self.noisy and (self.sigma or self.mu):
+                perturbation_dict = self.get_perturbation()
+                perturbed_w_eff = self.w_eff + perturbation_dict["w_eff"] if self.w_eff is not None else None
+                perturbed_b_eff = self.b_eff + perturbation_dict["b_eff"] if self.b_eff is not None else None
+                F.batch_norm(input, self.running_mean, self.running_var, bn_weight, bn_bias, self.training, self.momentum, self.eps)
+                return F.conv2d(input, perturbed_w_eff, perturbed_b_eff, stride=1, groups=self.num_features)
+            else:
+                return F.conv2d(input, self.w_eff, self.b_eff, stride=1, groups=self.num_features)
         else:
-            return F.batch_norm(input, self.running_mean, self.running_var, self.weight, self.bias, self.training, self.momentum, self.eps) 
-
+            return F.conv2d(input, self.w_eff, self.b_eff, stride=1, groups=self.num_features)
 
 def set_noisy(m, noisy=True):
     if isinstance(m, NoisyConv2d) or isinstance(m, NoisyLinear) or isinstance(m, NoisyIdentity) or isinstance(m, NoisyBN):
