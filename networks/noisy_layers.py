@@ -236,7 +236,7 @@ class NoisyBN(NoisyLayer, nn.modules.batchnorm._BatchNorm):
             self.w_eff = w_eff
         self.parameters_to_match   = ["b_eff", "w_eff"]
         self.parameters_to_perturb = ["b_eff", "w_eff"]
-
+    
     @property
     def fixtest_flag(self):
         return self._fixtest_flag
@@ -255,7 +255,7 @@ class NoisyBN(NoisyLayer, nn.modules.batchnorm._BatchNorm):
             else:
                 self.w_eff = w_eff
             self.apply_perturbation(**self.get_perturbation())
-     
+
     def forward(self, input):
         #if self.noisy and (self.sigma or self.mu) and (not self.fixtest_flag) and self.training:
         if not self.fixtest_flag: 
@@ -264,15 +264,18 @@ class NoisyBN(NoisyLayer, nn.modules.batchnorm._BatchNorm):
             bn_weight, bn_bias = self.weight.detach(), self.bias.detach()
             self.b_eff = self.bias - (bn_mean * self.weight) / torch.sqrt(bn_var + self.eps)
             self.w_eff = (self.weight / torch.sqrt(bn_var + self.eps)).view(self.num_features,1,1,1)
-            if self.noisy and (self.sigma or self.mu):
+            
+            if self.noisy and (self.sigma or self.mu) and self.training:
                 perturbation_dict = self.get_perturbation()
                 perturbed_w_eff = self.w_eff + perturbation_dict["w_eff"] if self.w_eff is not None else None
                 perturbed_b_eff = self.b_eff + perturbation_dict["b_eff"] if self.b_eff is not None else None
                 F.batch_norm(input, self.running_mean, self.running_var, bn_weight, bn_bias, self.training, self.momentum, self.eps)
                 return F.conv2d(input, perturbed_w_eff, perturbed_b_eff, stride=1, groups=self.num_features)
             else:
+                F.batch_norm(input, self.running_mean, self.running_var, bn_weight, bn_bias, self.training, self.momentum, self.eps)                
                 return F.conv2d(input, self.w_eff, self.b_eff, stride=1, groups=self.num_features)
         else:
+            #return F.batch_norm(input, self.running_mean, self.running_var, self.weight, self.bias, self.training, self.momentum, self.eps)
             return F.conv2d(input, self.w_eff, self.b_eff, stride=1, groups=self.num_features)
 
 def set_noisy(m, noisy=True):
