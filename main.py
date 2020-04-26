@@ -24,6 +24,9 @@ import numpy as np
 import json
 import xlwt
 
+from itertools import product
+import pandas as pd
+
 parser = argparse.ArgumentParser(description='HA-SGD Training',
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 parser.add_argument('--lr', default=0.01, type=float, help='learning_rate')
@@ -54,6 +57,7 @@ parser.add_argument('--tensorboard', action='store_true', help='Turn on the tens
 parser.add_argument('--regularization_type', type=str, choices=['l2', 'l1'], default='l2', help='Set the type of regularization')
 parser.add_argument('--regularization', type=float, default=5e-4, help='Set the strength of regularization')
 parser.add_argument('--seed', help='seed', type=int, default=42)
+parser.add_argument('--cpu', action='store_true', help='Use CPU instead of GPU')
 parser.add_argument('--device', type=int, nargs='+', default=None, help='Set the device(s) to use')
 parser.add_argument('--optim_type', default='SGD', type=str, choices=['SGD', 'EntropySGD', 'backpropless'], help='Set the type of optimizer')
 parser.add_argument('--momentum', default=0.9, type=float, help='Set the momentum coefficient')
@@ -62,6 +66,9 @@ parser.add_argument('--run_name', help='The name of this run (used for tensorboa
 
 parser.add_argument('--test_with_std', action='store_true', help="fix mean, change std while testing")
 parser.add_argument('--test_with_mean', action='store_true', help="fix std, change mean while testing")
+
+# parser.add_argument('--test_with_quantization', action='store_true', help="Test model with its quantized version")
+parser.add_argument('--test_quantization_levels', type=int, nargs='+', default=None, help="The levels of quantization during testing")
 
 if __name__ != "__main__":
     sys.exit(1)
@@ -73,7 +80,8 @@ test_std_list = [0.0, 0.02, 0.04, 0.06, 0.08, 0.1, 0.12, 0.14, 0.16, 0.18, 0.2]
 #test_mean_pos = [0.0]
 #test_mean_neg = [0.0]
 
-test_mean_list = [-0.08, -0.06, -0.04, -0.02, -0.01, -0.004, 0.0, 0.004, 0.01, 0.02, 0.04 , 0.06, 0.08]
+# test_mean_list = [-0.08, -0.06, -0.04, -0.02, -0.01, -0.004, 0.0, 0.004, 0.01, 0.02, 0.04 , 0.06, 0.08]
+test_mean_list = [-0.004, 0.0, 0.004]
 test_mean_pos = [0.0, 0.004, 0.01, 0.02, 0.04, 0.06, 0.08]
 test_mean_neg = [-0.08, -0.06, -0.04, -0.02, -0.01, -0.004, 0.0]
 
@@ -84,7 +92,7 @@ torch.manual_seed(args.seed)
 
 # Set devices
 device = torch.device('cpu')
-use_cuda = torch.cuda.is_available()
+use_cuda = torch.cuda.is_available() and not args.cpu
 if use_cuda:
     if args.device:
         device = torch.device('cuda:{:d}'.format(args.device[0]))
@@ -157,27 +165,9 @@ if use_cuda:
     net.cuda(device=device)
     cudnn.benchmark = True
 
-def train(net, epoch, optimizer, perturbation_level=None, tensorboard_writer=None, clipper=None):
+def train(net, epoch, optimizer, tensorboard_writer=None, clipper=None):
     net.train()
     net.apply(set_noisy)
-    if perturbation_level is None:
-        perturbation_level = args.training_noise
-    
-    if args.training_noise_type == 'gaussian':
-        net.apply(set_gaussian_noise)
-        if isinstance(net, nn.DataParallel):
-            net.module.set_sigma_list(perturbation_level)
-            net.module.set_mu_list(args.training_noise_mean)
-        else:
-            net.set_sigma_list(perturbation_level)
-            net.set_mu_list(args.training_noise_mean)
-
-    elif args.training_noise_type == 'uniform':
-        net.apply(set_uniform_noise)
-        if isinstance(net, nn.DataParallel):
-            net.module.set_sigma_list(1)
-        else:
-            net.set_sigma_list(1)
 
     train_loss, acc, acc5 = AverageMeter(), AverageMeter(), AverageMeter()
 
@@ -196,7 +186,6 @@ def train(net, epoch, optimizer, perturbation_level=None, tensorboard_writer=Non
             train_loss.update(loss.item(), inputs.size(0))
             loss.backward()
             optimizer.step()
-        
         else:
             pass
 
@@ -220,70 +209,121 @@ def train(net, epoch, optimizer, perturbation_level=None, tensorboard_writer=Non
     return acc.avg, acc5.avg, train_loss.avg
 
 
-def test(net, epoch, test_std, test_mean, tensorboard_writer=None):
+def test(net, epoch, dataloader):
     net.eval()
-    if isinstance(net, nn.DataParallel):
-        net.module.set_sigma_list(test_std)
-        net.module.set_mu_list(test_mean)
-    else:
-        net.set_sigma_list(test_std)
-        net.set_mu_list(test_mean)
-    net.apply(set_fixtest)
-
     test_loss, acc, acc5 = AverageMeter(), AverageMeter(), AverageMeter()
     with torch.no_grad():
-        for batch_idx, (inputs, targets) in enumerate(testloader):
+        for batch_idx, (inputs, targets) in enumerate(dataloader):
             if use_cuda:
                 inputs, targets = inputs.cuda(device=device), targets.cuda(device=device)
-                outputs = net(inputs)
-                loss = criterion(outputs, targets)
-                test_loss.update(loss.item(), targets.size(0))
-                prec1, prec5 = accuracy(outputs.data, targets.data, topk=(1,5))
-                acc.update(prec1, targets.size(0))
-                acc5.update(prec5, targets.size(0))
+            outputs = net(inputs)
+            loss = criterion(outputs, targets)
+            test_loss.update(loss.item(), targets.size(0))
+            prec1, prec5 = accuracy(outputs.data, targets.data, topk=(1,5))
+            acc.update(prec1, targets.size(0))
+            acc5.update(prec5, targets.size(0))
 
     print("\n| Validation Epoch #{:d}\t\t\tLoss: {:.4f} Acc@1: {:.2%}".format(epoch, loss.item(), acc.avg))
 
     return acc.avg, acc5.avg
 
 
-def test_with_std_mean(net, checkpoint, epoch = 0, test_mean_list=None, test_std_list=None, sample_num=1, writer=None):
-    test_acc_avg = []
-    test_acc_5_avg = []
-    test_acc_all = {}
-    test_acc_5_all = {}
-    if test_mean_list is not None:
-        for test_mean in test_mean_list:
-            print ('test noise mean:{}'.format(test_mean))
-            test_acc_all[str(test_mean)] = []
-            test_acc_5_all[str(test_mean)] = []
-            acc_avg = 0.0
-            acc_5_avg = 0.0
-            for i in range(sample_num):
-                net.load_state_dict(checkpoint['state_dict'], strict=False)
-                if use_cuda:
-                    net.to(device)        
-                if args.testing_noise_type == 'gaussian':
-                    net.apply(set_gaussian_noise)
-                elif args.testing_noise_type == 'uniform':
-                    net.apply(set_uniform_noise)
-                net.eval()
-                net.apply(set_noisy)
-                test_acc, test_acc_5 = test(net, epoch, args.training_noise, test_mean, writer)
-                if args.tensorboard and writer is not None:
-                    writer.add_scalar(f"test_acc/{test_mean}", test_acc, global_step=(epoch+1)*len(trainloader))
-                    writer.add_scalar(f"test_top5_acc/{test_mean}", test_acc_5, global_step=(epoch+1)*len(trainloader))
-                test_acc_all[str(test_mean)].append(test_acc.cpu().item())
-                test_acc_5_all[str(test_mean)].append(test_acc_5.cpu().item())
-                acc_avg += test_acc/sample_num
-                acc_5_avg += test_acc_5/sample_num
+def prepare_network_perturbation(
+        net, noise_type: str = 'gaussian', fixtest: bool = False,
+        perturbation_level: float = None, perturbation_mean: float = None):
+    """Set the perturbation and quantization of the network in-place
+    """
+    if noise_type == 'gaussian':
+        net.apply(set_gaussian_noise)
+        if isinstance(net, nn.DataParallel):
+            net.module.set_sigma_list(perturbation_level)
+            net.module.set_mu_list(perturbation_mean)
+        else:
+            net.set_sigma_list(perturbation_level)
+            net.set_mu_list(perturbation_mean)
+    elif noise_type == 'uniform':
+        net.apply(set_uniform_noise)
+        if isinstance(net, nn.DataParallel):
+            net.module.set_sigma_list(1)
+        else:
+            net.set_sigma_list(1)
 
-            test_acc_avg.append(acc_avg.cpu().item())
-            test_acc_5_avg.append(acc_5_avg.cpu().item())
-
-    return test_acc_avg, test_acc_5_avg, test_acc_all, test_acc_5_all
+    if fixtest:
+        net.apply(set_fixtest)
 
 
+def prepare_network_quantization(
+        net, num_quantization_levels: int, calibration_dataloader: torch.utils.data.DataLoader,
+        qat: bool = False, num_calibration_batchs: int = 10):
+        # The last two arguments are redundant for now
+    if num_quantization_levels is None:
+        return
+    # Specify quantization configuration
+    net.set_quantization_level(num_quantization_levels)
+    net.enable_quantization()
+    # Calibrate with the test set TODO: use the training set to calibrate
+    test(net, -1, calibration_dataloader)
+    print('Post Training Quantization: Calibration done')
+    # net.qconfig = get_qconfig(num_quantization_levels)
+    # print('Quantization Config:', net.qconfig)
+    # if qat:
+    #     torch.quantization.prepare_qat(net, inplace=True)
+    #     test(net, -1, calibration_dataloader)
+    # else:
+    #     torch.quantization.prepare(net, inplace=True)
+    #     # Calibrate first
+    #     print('Post Training Quantization Prepare: Inserting Observers')
+
+    #     # Calibrate with the test set TODO: use the training set to calibrate
+    #     test(net, -1, calibration_dataloader)
+    #     print('Post Training Quantization: Calibration done')
+
+    #     # Convert to quantized model
+    #     torch.quantization.convert(net, inplace=True)
+    #     print('Post Training Quantization: Convert done')
+
+def test_with_std_mean(net, checkpoint, epoch = 0, test_mean_list=[None],
+                       test_std_list=[None], test_quantization_levels=[None],
+                       sample_num=1, writer=None):
+    if test_std_list is None:
+        test_std_list = [None]
+    if test_mean_list is None:
+        test_mean_list = [None]
+    if test_quantization_levels is None:
+        test_quantization_levels = [None]
+    results = []
+    for stdev, mean, quant_levels in product(test_std_list, test_mean_list, test_quantization_levels):
+        def prepare_and_test():
+            net.load_state_dict(checkpoint['state_dict'], strict=False)
+            if use_cuda:
+                net.to(device)
+            else:
+                net.to("cpu")
+            net.eval()
+            net.apply(set_noisy)
+            prepare_network_perturbation(net=net, noise_type=args.testing_noise_type, fixtest=True, perturbation_level=stdev, perturbation_mean=mean)
+            prepare_network_quantization(net=net, num_quantization_levels=quant_levels, calibration_dataloader=testloader, qat=False)
+            test_acc, test_acc_5 = test(net, epoch, testloader)
+            if args.tensorboard and writer is not None:
+                # TODO: the proper value of the global_step?
+                writer.add_scalar(f"test_acc/{mean}", test_acc, global_step=(epoch+1)*len(trainloader))
+                writer.add_scalar(f"test_top5_acc/{mean}", test_acc_5, global_step=(epoch+1)*len(trainloader))
+            return test_acc.cpu().item(), test_acc_5.cpu().item()
+
+        print (f'test noise stdev: {stdev}, test noise mean: {mean},'
+               f' test quant levels: {quant_levels}')
+        acc_tuple_list = [prepare_and_test() for i in range(sample_num)]
+        test_acc_list, test_acc5_list = zip(*acc_tuple_list)
+        results.append({
+            "stdev": stdev, "mean": mean, "quant_levels": quant_levels,
+            "test_acc": test_acc_list, 
+            "test_acc5": test_acc5_list, 
+        })
+    df = pd.DataFrame(results)
+    df["test_acc_avg"] = df["test_acc"].apply(np.mean)
+    df["test_acc5_avg"] = df["test_acc5"].apply(np.mean)
+    df = df.fillna(0)
+    return df
 
 def save_model(net, save_point, args, metric = 1, stats_dict: dict=None):
     state = {
@@ -319,17 +359,18 @@ if args.testOnly:
         checkpoint_file = './checkpoint/'+args.dataset+'/'+args.training_noise_type+'/'+file_name + '_metric1.pkl'
     checkpoint = torch.load(checkpoint_file)
 
-    test_acc_avg, test_acc_5_avg, test_acc_all, test_acc_5_all = test_with_std_mean(net, checkpoint,test_mean_list=test_mean_list, sample_num=20)
+    test_acc_df = test_with_std_mean(
+        net, checkpoint, test_mean_list=test_mean_list,
+        test_std_list=args.testing_noise,
+        test_quantization_levels=args.test_quantization_levels,
+        sample_num=20
+    )
 
     with open(os.path.join('test', file_name + '_metric1.test'), 'a') as f:
         f.write('\n')
         json.dump({
             "args": vars(args),
-            "test_mean_list": test_mean_list,
-            "test_acc_avg": test_acc_avg,
-            "test_acc_5_avg": test_acc_5_avg,
-            "test_acc_all": test_acc_all,
-            "test_acc_5_all": test_acc_5_all            
+            "test_acc_df": test_acc_df.to_json() # load with `pd.read_json()`
         },f)
 
     sys.exit(0)
@@ -373,34 +414,34 @@ for epoch in range(start_epoch, start_epoch+num_epochs):
     net_test.to(device)
     checkpoint_file = './checkpoint/'+args.dataset+'/'+args.training_noise_type+'/'+file_name + '_current.pkl'
     checkpoint = torch.load(checkpoint_file)
-    test_acc_avg, test_acc_5_avg, _, _ = test_with_std_mean(net_test, checkpoint, epoch = epoch, test_mean_list=test_mean_list, sample_num=1, writer=writer)
+    test_acc_df = test_with_std_mean(net_test, checkpoint, epoch = epoch, test_mean_list=test_mean_list, sample_num=1, writer=writer)
 
-    test_acc_dict = {}
-    for i in range(len(test_mean_list)):
-        test_acc_dict[test_mean_list[i]] = test_acc_avg[i]
-
-    if args.training_noise_mean is not None:
-        best_metric_1 = test_acc_dict[args.training_noise_mean[0]]
-    else:
-        best_metric_1 = test_acc_dict[0.0]
+    # TODO: not dealing with training & testing quant_level yet
+    training_noise_stdev = args.training_noise[0] if args.training_noise is not None else 0
+    training_noise_mean = args.training_noise_mean[0] if args.training_noise_mean is not None else 0
+    metric_1 = test_acc_df[
+        (test_acc_df['mean'] == training_noise_mean) # & (test_acc_df['stdev'] == training_noise_stdev)
+    ]["test_acc_avg"]
+    assert len(metric_1) > 0, "No metric1 because not testing for the training case"
+    best_metric_1 = metric_1.values[0]
 
     if best_metric_1 > best_acc_1:
-        print (best_metric_1)
+        print(best_metric_1)
         save_model(net, save_point, args, 1, {"acc": best_metric_1, "epoch": epoch})
         best_acc_1 = best_metric_1
 
-    if args.training_noise_mean is not None:       
-        if args.training_noise_mean[0] > 0:
-            best_metric_2 = sum(test_acc_dict[i] for i in test_mean_pos) / len(test_mean_pos)
-        elif args.training_noise_mean[0] < 0:
-            best_metric_2 = sum(test_acc_dict[i] for i in test_mean_neg) / len(test_mean_neg)
-    else:
-        best_metric_2 = test_acc_dict[0.0]
+    # if args.training_noise_mean is not None:       
+    #     if args.training_noise_mean[0] > 0:
+    #         best_metric_2 = sum(test_acc_dict[i] for i in test_mean_pos) / len(test_mean_pos)
+    #     elif args.training_noise_mean[0] < 0:
+    #         best_metric_2 = sum(test_acc_dict[i] for i in test_mean_neg) / len(test_mean_neg)
+    # else:
+    #     best_metric_2 = test_acc_dict[0.0]
 
-    if best_metric_2 > best_acc_2:
-        print (best_metric_2)
-        save_model(net, save_point, args, 2, {"acc": best_metric_2, "epoch": epoch})
-        best_acc_2 = best_metric_2
+    # if best_metric_2 > best_acc_2:
+    #     print (best_metric_2)
+    #     save_model(net, save_point, args, 2, {"acc": best_metric_2, "epoch": epoch})
+    #     best_acc_2 = best_metric_2
 
     epoch_time = time.time() - start_time
     elapsed_time += epoch_time
