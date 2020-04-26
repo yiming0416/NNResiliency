@@ -164,8 +164,9 @@ class NoisyConv2d(NoisyLayer, nn.Conv2d):
             s += ', groups={groups}'
         if self.bias is None:
             s += ', bias=False'
-        if self.sigma:
-            s += ', sigma={sigma}'
+        # if self.sigma:
+        s += ', sigma={sigma}'
+        s += ', mu={mu}'
         return s.format(**self.__dict__)
 
 
@@ -186,8 +187,8 @@ class NoisyLinear(NoisyLayer, nn.Linear):
 
     def extra_repr(self):
         s = super().extra_repr()
-        if self.sigma:
-            s += ', sigma={sigma}'
+        s += ', sigma={sigma}'
+        s += ', mu={mu}'
         return s.format(**self.__dict__)
 
 
@@ -216,6 +217,11 @@ class NoisyIdentity(NoisyLayer, nn.Module):
                 return self.out_fix[:x.size(0)] * x                
         else:
             return x
+
+    def extra_repr(self):
+        s = super().extra_repr()
+        s += ', sigma={sigma}'
+        return s.format(**self.__dict__)
 
 class NoisyBN(NoisyLayer, nn.modules.batchnorm._BatchNorm):
     def __init__(self, num_features, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True, mu=0, sigma=1, use_range=True, match_range=True):
@@ -277,6 +283,82 @@ class NoisyBN(NoisyLayer, nn.modules.batchnorm._BatchNorm):
         else:
             #return F.batch_norm(input, self.running_mean, self.running_var, self.weight, self.bias, self.training, self.momentum, self.eps)
             return F.conv2d(input, self.w_eff, self.b_eff, stride=1, groups=self.num_features)
+
+    def extra_repr(self):
+        s = super().extra_repr()
+        s += ', sigma={sigma}'
+        s += ', mu={mu}'
+        return s.format(**self.__dict__)
+
+# class NoisyLinearQ(NoisyLinear):
+#     _FLOAT_MODULE = NoisyLinear
+#     def __init__(self, *args, qconfig=None, **kwargs):
+#         super(NoisyLinearQ, self).__init__(*args, **kwargs)
+#         assert qconfig, 'qconfig must be provided for QAT module'
+#         self.qconfig = qconfig
+#         self.activation_post_process = qconfig.activation()
+#         self.weight_fake_quant = qconfig.weight()
+
+#     def forward(self, input):
+#         return self.activation_post_process(
+#             super(NoisyLinearQ, self).forward(input)
+#         )
+
+#     @classmethod
+#     def from_float(cls, mod, qconfig=None):
+#         r"""Create a qat module from a float module or qparams_dict
+
+#             Args: `mod` a float module, either produced by torch.quantization utilities
+#             or directly from user
+#         """
+#         assert type(mod) == cls._FLOAT_MODULE, cls.__name__ + '.from_float only works for ' + \
+#             cls._FLOAT_MODULE.__name__
+#         if not qconfig:
+#             assert hasattr(mod, 'qconfig'), 'Input float module must have qconfig defined'
+#             assert mod.qconfig, 'Input float module must have a valid qconfig'
+
+#         # not fusing for now
+#         # if type(mod) == LinearReLU:
+#         #     mod = mod[0]
+
+#         qconfig = mod.qconfig
+#         qat_linear = cls(mod.in_features, mod.out_features, bias=mod.bias is not None, mu=mod.mu, sigma=mod.sigma, use_range=mod.use_range, match_range=mod.match_range, qconfig=qconfig)
+#         qat_linear.weight = mod.weight
+#         qat_linear.bias = mod.bias
+#         return qat_linear
+
+# class NoisyConv2dQ(NoisyConv2d):
+#     _FLOAT_MODULE = NoisyConv2d
+#     def __init__(self, *args, qconfig=None, **kwargs):
+#         super(NoisyConv2dQ, self).__init__(*args, **kwargs)
+#         assert qconfig, 'qconfig must be provided for QAT module'
+#         self.qconfig = qconfig
+#         self.activation_post_process = qconfig.activation()
+#         self.weight_fake_quant = qconfig.weight()
+
+#     def forward(self, input):
+#         return self.activation_post_process(
+#             super(NoisyConv2dQ, self).forward(input)
+#         )
+
+#     @classmethod
+#     def from_float(cls, mod, qconfig=None):
+#         r"""Create a qat module from a float module or qparams_dict
+
+#             Args: `mod` a float module, either produced by torch.quantization utilities
+#             or directly from user
+#         """
+#         assert type(mod) == cls._FLOAT_MODULE, cls.__name__ + '.from_float only works for ' + \
+#             cls._FLOAT_MODULE.__name__
+#         if not qconfig:
+#             assert hasattr(mod, 'qconfig'), 'Input float module must have qconfig defined'
+#             assert mod.qconfig, 'Input float module must have a valid qconfig'
+
+#         qconfig = mod.qconfig
+#         qat_conv2d = cls(mod.in_channels, mod.out_channels, mod.kernel_size, stride=mod.stride, padding=mod.padding, dilation=mod.dilation, groups=mod.groups, bias=mod.bias is not None, mu=mod.mu, sigma=mod.sigma, use_range=mod.use_range, match_range=mod.match_range, qconfig=qconfig)
+#         qat_conv2d.weight = mod.weight
+#         qat_conv2d.bias = mod.bias
+#         return qat_conv2d
 
 def set_noisy(m, noisy=True):
     if isinstance(m, NoisyConv2d) or isinstance(m, NoisyLinear) or isinstance(m, NoisyIdentity) or isinstance(m, NoisyBN):
