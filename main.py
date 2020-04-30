@@ -41,6 +41,7 @@ parser.add_argument('--dropout_rate', default=0.3, type=float, help='dropout_rat
 parser.add_argument('--dataset', default='cifar10', type=str, choices=['cifar10', 'cifar100', 'mnist'], help='dataset = [cifar10/cifar100/mnist]')
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--testOnly', '-t', action='store_true', help='Test mode with the saved model')
+parser.add_argument('--test_sample_num', type=int, default=20, help='The number of test runs per setting')
 parser.add_argument('--load_model', type=str, default=None, help='Specify the model .pkl to load for testing/resuming training')
 parser.add_argument('--training_noise', type=float, nargs='+', default=None, help='Set the training noise standard deviation')
 parser.add_argument('--testing_noise', type=float, nargs='+', default=None, help='Set the testing noise standard deviation')
@@ -303,7 +304,7 @@ def test_with_std_mean(net, checkpoint, epoch = 0, test_mean_list=[None],
             net.eval()
             net.apply(set_noisy)
             prepare_network_perturbation(net=net, noise_type=args.testing_noise_type, fixtest=True, perturbation_level=stdev, perturbation_mean=mean)
-            prepare_network_quantization(net=net, num_quantization_levels=quant_levels, calibration_dataloader=testloader, qat=False)
+            prepare_network_quantization(net=net, num_quantization_levels=quant_levels, calibration_dataloader=trainloader, qat=False)
             test_acc, test_acc_5 = test(net, epoch, testloader)
             if args.tensorboard and writer is not None:
                 # TODO: the proper value of the global_step?
@@ -361,10 +362,10 @@ if args.testOnly:
     checkpoint = torch.load(checkpoint_file)
 
     test_acc_df = test_with_std_mean(
-        net, checkpoint, test_mean_list=test_mean_list,
+        net, checkpoint, test_mean_list=args.testing_noise_mean,
         test_std_list=args.testing_noise,
         test_quantization_levels=args.test_quantization_levels,
-        sample_num=20
+        sample_num=args.test_sample_num
     )
 
     with open(os.path.join('test', file_name + '_metric1.test'), 'a') as f:
@@ -402,7 +403,12 @@ save_point = os.path.join('checkpoint', args.dataset, args.training_noise_type)
 for epoch in range(start_epoch, start_epoch+num_epochs):
     start_time = time.time()
     # train
-    if args.optim_type == "SGD": 
+    if args.optim_type == "SGD":
+        prepare_network_perturbation(
+            net, noise_type=args.training_noise_type, fixtest=False,
+            perturbation_level=args.training_noise, perturbation_mean=args.training_noise_mean
+        )
+
         train_acc, train_acc_5, train_loss = train(net, epoch, optimizer, tensorboard_writer=writer)
         scheduler.step()
     elif args.optim_type == "EntropySGD":
@@ -415,7 +421,7 @@ for epoch in range(start_epoch, start_epoch+num_epochs):
     net_test.to(device)
     checkpoint_file = './checkpoint/'+args.dataset+'/'+args.training_noise_type+'/'+file_name + '_current.pkl'
     checkpoint = torch.load(checkpoint_file)
-    test_acc_df = test_with_std_mean(net_test, checkpoint, epoch = epoch, test_mean_list=test_mean_list, sample_num=1, writer=writer)
+    test_acc_df = test_with_std_mean(net_test, checkpoint, epoch = epoch, test_std_list=args.testing_noise, test_mean_list=args.testing_noise_mean, sample_num=1, writer=writer)
 
     # TODO: not dealing with training & testing quant_level yet
     training_noise_stdev = args.training_noise[0] if args.training_noise is not None else 0

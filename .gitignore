@@ -3,3 +3,5 @@ __pycache__
 checkpoint
 data
 tensorboard_dir
+test
+*.bak
