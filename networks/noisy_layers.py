@@ -169,6 +169,24 @@ class NoisyConv2d(NoisyLayer, nn.Conv2d):
         s += ', mu={mu}'
         return s.format(**self.__dict__)
 
+# TODO: enable grouped unrolling?
+class NoisyConv2dUnrolled(NoisyConv2d):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1,
+                 groups=1, bias=True, mu=0, sigma=1, use_range=True, match_range=True):
+        super(NoisyConv2dUnrolled, self).__init__(in_channels, out_channels, kernel_size, stride=1,
+                                                padding=0, dilation=1, groups=1, bias=True, mu=0, sigma=1, use_range=True, match_range=True)
+    def forward(self, input):
+        if self.noisy and (self.sigma or self.mu) and (not self.fixtest_flag):
+            weight_perturb_stdev = self.perturbation_stdev_dict["weight"]
+            output = F.conv2d(input, self.weight + self.mu * weight_perturb_stdev, self.bias, self.stride, self.padding, self.dilation, self.groups)
+            if self.bias is not None:
+                output += self.perturbation_stdev_dict["bias"] * self.sigma * torch.randn_like(output) + self.mu * self.perturbation_stdev_dict["bias"]
+            perturb_stdev = weight_perturb_stdev * self.sigma * torch.sqrt(F.conv2d(input.detach() ** 2, torch.ones_like(self.weight), stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups))
+            assert output.size() == perturb_stdev.size()
+            output += perturb_stdev * torch.randn_like(perturb_stdev)
+            return output
+        else:
+            return F.conv2d(input, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
 
 class NoisyLinear(NoisyLayer, nn.Linear):
     def __init__(self, in_features, out_features, bias=True, mu=0, sigma=1, use_range=True, match_range=True):
@@ -275,6 +293,8 @@ class NoisyBN(NoisyLayer, nn.modules.batchnorm._BatchNorm):
                 perturbation_dict = self.get_perturbation()
                 perturbed_w_eff = self.w_eff + perturbation_dict["w_eff"] if self.w_eff is not None else None
                 perturbed_b_eff = self.b_eff + perturbation_dict["b_eff"] if self.b_eff is not None else None
+                # This call of F.batch_norm is just to update the running_mean and running_var
+                # TODO: checkout https://github.com/pytorch/pytorch/blob/master/aten/src/ATen/native/Normalization.cpp#L259 to replicate the update of the stats and save some computing here
                 F.batch_norm(input, self.running_mean, self.running_var, bn_weight, bn_bias, self.training, self.momentum, self.eps)
                 return F.conv2d(input, perturbed_w_eff, perturbed_b_eff, stride=1, groups=self.num_features)
             else:
@@ -289,6 +309,36 @@ class NoisyBN(NoisyLayer, nn.modules.batchnorm._BatchNorm):
         s += ', sigma={sigma}'
         s += ', mu={mu}'
         return s.format(**self.__dict__)
+
+# TODO: enable grouped unrolling?
+class NoisyBNUnrolled(NoisyBN):
+    def __init__(self, num_features, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True, mu=0, sigma=1, use_range=True, match_range=True):
+        super(NoisyBNUnrolled, self).__init__(num_features, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True, mu=0, sigma=1, use_range=True, match_range=True)
+
+    def forward(self, input):
+        if not self.fixtest_flag: 
+            bn_mean = input.mean(axis=(0,2,3))
+            bn_var = input.var(axis=(0,2,3), unbiased=False)
+            bn_weight, bn_bias = self.weight.detach(), self.bias.detach()
+            self.b_eff = self.bias - (bn_mean * self.weight) / torch.sqrt(bn_var + self.eps)
+            self.w_eff = (self.weight / torch.sqrt(bn_var + self.eps)).view(self.num_features,1,1,1)
+            
+            if self.noisy and (self.sigma or self.mu) and self.training:
+                shifted_w_eff = self.w_eff + self.perturbation_stdev_dict["w_eff"] * self.mu
+                shifted_b_eff = self.b_eff + self.perturbation_stdev_dict["b_eff"] * self.mu
+                output = F.conv2d(input, shifted_w_eff, shifted_b_eff, stride=1, groups=self.num_features)
+                output += self.sigma * self.perturbation_stdev_dict["b_eff"] * torch.randn_like(output)
+                output += self.sigma * self.perturbation_stdev_dict["w_eff"] * input * torch.randn_like(output)
+                # This call of F.batch_norm is just to update the running_mean and running_var
+                # TODO: checkout https://github.com/pytorch/pytorch/blob/master/aten/src/ATen/native/Normalization.cpp#L259 to replicate the update of the stats and save some computing here
+                F.batch_norm(input, self.running_mean, self.running_var, bn_weight, bn_bias, self.training, self.momentum, self.eps)
+                return output
+            else:
+                F.batch_norm(input, self.running_mean, self.running_var, bn_weight, bn_bias, self.training, self.momentum, self.eps)                
+                return F.conv2d(input, self.w_eff, self.b_eff, stride=1, groups=self.num_features)
+        else:
+            #return F.batch_norm(input, self.running_mean, self.running_var, self.weight, self.bias, self.training, self.momentum, self.eps)
+            return F.conv2d(input, self.w_eff, self.b_eff, stride=1, groups=self.num_features)
 
 # class NoisyLinearQ(NoisyLinear):
 #     _FLOAT_MODULE = NoisyLinear
@@ -407,11 +457,11 @@ def cal_range(weight: torch.Tensor, noise_range_ratio: float):
     assert noise_range_ratio <= 1 and noise_range_ratio > 0
     # TODO: with torch.no_grad():
     if noise_range_ratio == 1:
-        return (torch.max(weight) - torch.min(weight))/2
+        return (torch.max(weight.detach()) - torch.min(weight.detach()))/2
 
-    top_rank = max(int(len(weight) * (1-noise_range_ratio)/2) + 1, 1)
-    bottom_rank = min(len(weight) - top_rank + 1, len(weight))
-    tmp = weight.view(-1)
+    top_rank = max(int(weight.nelement() * (1-noise_range_ratio)/2) + 1, 1)
+    bottom_rank = min(weight.nelement() - top_rank + 1, weight.nelement())
+    tmp = weight.detach().view(-1)
     low_bound, _ = torch.kthvalue(tmp, top_rank)
     high_bound, _ = torch.kthvalue(tmp, bottom_rank)
     range_ = (high_bound - low_bound) / 2
