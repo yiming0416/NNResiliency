@@ -1,4 +1,51 @@
 from networks import *
+import config as cf
+import torchvision
+import torchvision.transforms as transforms
+import sys
+
+def getDatasets(dataset: str):
+    transform_train_CIFAR = transforms.Compose([
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(cf.mean[dataset], cf.std[dataset]),
+    ]) # meanstd transformation
+
+    transform_train_MNIST = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(cf.mean[dataset], cf.std[dataset]),
+    ]) # meanstd transformation
+
+    transform_test_CIFAR = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(cf.mean[dataset], cf.std[dataset]),
+    ])
+
+    transform_test_MNIST = transforms.Compose([
+        # transforms.Pad(padding=2, fill=0),
+        transforms.ToTensor(),
+        transforms.Normalize(cf.mean[dataset], cf.std[dataset]),
+    ])
+    if(dataset == 'cifar10'):
+        print("| Preparing CIFAR-10 dataset...")
+        sys.stdout.write("| ")
+        trainset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train_CIFAR)
+        testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_test_CIFAR)
+        num_classes = 10
+    elif(dataset == 'cifar100'):
+        print("| Preparing CIFAR-100 dataset...")
+        sys.stdout.write("| ")
+        trainset = torchvision.datasets.CIFAR100(root='./data', train=True, download=True, transform=transform_train_CIFAR)
+        testset = torchvision.datasets.CIFAR100(root='./data', train=False, download=True, transform=transform_test_CIFAR)
+        num_classes = 100
+    elif(dataset == 'mnist'):
+        print("| Preparing MNIST dataset...")
+        sys.stdout.write("| ")
+        trainset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=transform_train_MNIST)
+        testset = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=transform_test_MNIST)
+        num_classes = 10
+    return trainset, testset, num_classes
 
 def getNetworkName(args):
     parts = []
@@ -10,7 +57,7 @@ def getNetworkName(args):
     else:
         parts.append('noise_std-{}'.format(args.training_noise))
     if args.training_noise_mean is None:
-        parts.append('noise_mean-[0.0]'.format(args.training_noise))
+        parts.append('noise_mean-[0.0]')
     else:
         parts.append('noise_mean-{}'.format(args.training_noise_mean))
 
@@ -54,50 +101,3 @@ def getNetwork(args, num_classes):
 
     return net, file_name
 
-
-def write_acc_excel(args, book, testing_noise_list, noisy_test_acc, noisy_test_acc_5, noisy_test_acc_all, noisy_test_acc_5_all):
-    row, col = 0, 0
-    _, file_name = getNetwork(args)
-    sheet = book.add_sheet('1')
-        
-    for i in range (len(testing_noise_list)):
-        sheet.write(row, col+i+1, testing_noise_list[i])
-
-    row += 1
-    sheet.write(row, col, file_name+'_top1')
-    for i in range (len(noisy_test_acc)):
-        sheet.write(row, col+i+1, noisy_test_acc[i])
-
-    row += 1
-    for i in range(len(testing_noise_list)):
-        col += 1
-        for j in range(len(noisy_test_acc_all[str(testing_noise_list[i])])):
-            sheet.write(row+j+1, col, noisy_test_acc_all[str(testing_noise_list[i])][j])
-
-
-    row += (len(noisy_test_acc_all['0.02'])+1)
-    col = 0
-    for i in range(len(testing_noise_list)):
-        sheet.write(row, col+i+1, np.std(np.asarray(noisy_test_acc_all[str(testing_noise_list[i])])))
-
-    row += 2
-    col = 0
-
-    sheet.write(row, col, file_name + '_top5')
-    for i in range (len(noisy_test_acc_5)):
-        sheet.write(row, col+i+1, noisy_test_acc_5[i])
-
-    row += 1
-
-    for i in range (len(testing_noise_list)):
-        col += 1
-        for j in range(len(noisy_test_acc_5_all[str(testing_noise_list[i])])):
-            sheet.write(row+j+1, col, noisy_test_acc_5_all[str(testing_noise_list[i])][j])
-
-    row += (len(noisy_test_acc_5_all['0.02'])+1)
-
-    col = 0
-    for i in range(len(testing_noise_list)):
-        sheet.write(row, col+i+1, np.std(np.asarray(noisy_test_acc_5_all[str(testing_noise_list[i])])))
-
-    book.save('./excel/'+ file_name + '.xls')

@@ -173,8 +173,36 @@ class NoisyConv2d(NoisyLayer, nn.Conv2d):
 class NoisyConv2dUnrolled(NoisyConv2d):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1,
                  groups=1, bias=True, mu=0, sigma=1, use_range=True, match_range=True):
-        super(NoisyConv2dUnrolled, self).__init__(in_channels, out_channels, kernel_size, stride=1,
-                                                padding=0, dilation=1, groups=1, bias=True, mu=0, sigma=1, use_range=True, match_range=True)
+        super(NoisyConv2dUnrolled, self).__init__(in_channels, out_channels, kernel_size, stride,
+                                                padding, dilation, groups, bias, mu, sigma, use_range, match_range)
+        self.output_size = None
+
+    @property
+    def fixtest_flag(self):
+        return self._fixtest_flag
+    @fixtest_flag.setter
+    def fixtest_flag(self, fixtest_flag: bool):
+        self._fixtest_flag = fixtest_flag
+        if self._fixtest_flag:
+            assert self.output_size is not None, "Need to specify output size (H, W) before setting fixtest"
+            assert len(self.output_size) == 2, "self.output_size is expected to have two integers but has value {}".format(self.output_size)
+            # prepare the unfold object
+            self.fold_params = dict(kernel_size=self.kernel_size, dilation=self.dilation, padding=self.padding, stride=self.stride)
+            self.unfold = nn.Unfold(**self.fold_params)
+            # prepare the unrolled kernel
+            num_out_locations = self.output_size[0] * self.output_size[1]
+            # unrolled_weight dimensions: (out_channels, C * $\prod$ (kernel size), unrolling_instances)
+            self.unrolled_weight = self.weight.view(self.weight.size(0),-1,1).expand(-1,-1, num_out_locations)
+            self.unrolled_weight = self.unrolled_weight.detach() +\
+                torch.randn_like(self.unrolled_weight) * self.sigma * self.perturbation_stdev_dict["weight"] +\
+                self.mu * self.perturbation_stdev_dict["weight"]
+            if self.bias is not None:
+                # unrolled_bias dimensions: (batch, out_channels, unrolling_instances)
+                self.unrolled_bias = self.bias.view(1,-1,1).expand(-1, -1, num_out_locations)
+                self.unrolled_bias = self.unrolled_bias.detach() +\
+                    torch.randn_like(self.unrolled_bias) * self.sigma * self.perturbation_stdev_dict["bias"] +\
+                    self.mu * self.perturbation_stdev_dict["bias"]
+
     def forward(self, input):
         if self.noisy and (self.sigma or self.mu) and (not self.fixtest_flag):
             weight_perturb_stdev = self.perturbation_stdev_dict["weight"]
@@ -184,9 +212,29 @@ class NoisyConv2dUnrolled(NoisyConv2d):
             perturb_stdev = weight_perturb_stdev * self.sigma * torch.sqrt(F.conv2d(input.detach() ** 2, torch.ones_like(self.weight), stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups))
             assert output.size() == perturb_stdev.size()
             output += perturb_stdev * torch.randn_like(perturb_stdev)
+            self.output_size = output.size()[-2:] # use the latest output to set size
+            return output
+        elif self.fixtest_flag:
+            input_unf = self.unfold(input)
+            try:
+                # input_unf has dimensions (batch, C * $\prod$ (kernel size), unrolling_instances)
+                # unrolled_weight dimensions: (out_channels, C * $\prod$ (kernel size), unrolling_instances)
+                # output has dimensions: (batch, out_channels, unrolling_instances)
+                output = torch.einsum("bjk,cjk->bck", input_unf, self.unrolled_weight)
+            except:
+                print(f"input size: {input.size()}")
+                print(f"weight size: {self.weight.size()}")
+                print(f"unfold input size: {input_unf.size()}")
+                print(f"unrolled_weight size: {self.unrolled_weight.size()}")
+                output = torch.einsum("bjk,cjk->bck", input_unf, self.unrolled_weight)
+            if self.bias is not None:
+                output += self.unrolled_bias
+            output = output.view(output.size(0), output.size(1), self.output_size[0], self.output_size[1])
             return output
         else:
-            return F.conv2d(input, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+            output = F.conv2d(input, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+            self.output_size = output.size()[-2:] # use the latest output to set size
+            return output
 
 class NoisyLinear(NoisyLayer, nn.Linear):
     def __init__(self, in_features, out_features, bias=True, mu=0, sigma=1, use_range=True, match_range=True):
@@ -314,6 +362,36 @@ class NoisyBN(NoisyLayer, nn.modules.batchnorm._BatchNorm):
 class NoisyBNUnrolled(NoisyBN):
     def __init__(self, num_features, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True, mu=0, sigma=1, use_range=True, match_range=True):
         super(NoisyBNUnrolled, self).__init__(num_features, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True, mu=0, sigma=1, use_range=True, match_range=True)
+        self.output_size = None
+
+    @property
+    def fixtest_flag(self):
+        return self._fixtest_flag
+    @fixtest_flag.setter
+    def fixtest_flag(self, fixtest_flag: bool):
+        self._fixtest_flag = fixtest_flag
+        if self._fixtest_flag:
+            assert self.output_size is not None, "Need to specify output size (H, W) before setting fixtest"
+            assert len(self.output_size) == 2, "self.output_size is expected to have two integers but has value {}".format(self.output_size)
+
+            b_eff = self.bias - (self.running_mean * self.weight) / torch.sqrt(self.running_var + self.eps)
+            w_eff = (self.weight / torch.sqrt(self.running_var + self.eps)).view(self.num_features,1,1,1)
+
+            if not hasattr(self, "b_eff"):
+                self.register_buffer("b_eff", b_eff)
+            else:
+                self.b_eff = b_eff
+            if not hasattr(self, "w_eff"):
+                self.register_buffer("w_eff", w_eff)
+            else:
+                self.w_eff = w_eff
+
+            perturbation_stdev_dict = self.perturbation_stdev_dict
+            w_eff = w_eff.view(1,-1,1,1).expand(-1, -1, self.output_size[0], self.output_size[1])
+            w_eff = w_eff + torch.randn_like(w_eff) * self.sigma * perturbation_stdev_dict["w_eff"] + self.mu * perturbation_stdev_dict["w_eff"]
+            b_eff = b_eff.view(1,-1,1,1).expand(-1, -1, self.output_size[0], self.output_size[1])
+            b_eff = b_eff + torch.randn_like(b_eff) * self.sigma * perturbation_stdev_dict["b_eff"] + self.mu * perturbation_stdev_dict["b_eff"]
+            self.w_eff, self.b_eff = w_eff, b_eff
 
     def forward(self, input):
         if not self.fixtest_flag: 
@@ -332,13 +410,19 @@ class NoisyBNUnrolled(NoisyBN):
                 # This call of F.batch_norm is just to update the running_mean and running_var
                 # TODO: checkout https://github.com/pytorch/pytorch/blob/master/aten/src/ATen/native/Normalization.cpp#L259 to replicate the update of the stats and save some computing here
                 F.batch_norm(input, self.running_mean, self.running_var, bn_weight, bn_bias, self.training, self.momentum, self.eps)
+                self.output_size = output.size()[-2:]
                 return output
             else:
                 F.batch_norm(input, self.running_mean, self.running_var, bn_weight, bn_bias, self.training, self.momentum, self.eps)                
-                return F.conv2d(input, self.w_eff, self.b_eff, stride=1, groups=self.num_features)
+                output = F.conv2d(input, self.w_eff, self.b_eff, stride=1, groups=self.num_features)
+                self.output_size = output.size()[-2:]
+                return output
         else:
-            #return F.batch_norm(input, self.running_mean, self.running_var, self.weight, self.bias, self.training, self.momentum, self.eps)
-            return F.conv2d(input, self.w_eff, self.b_eff, stride=1, groups=self.num_features)
+            # print(f"input size: {input.size()}")
+            # print(f"w_eff size: {self.w_eff.size()}")
+            # print(f"b_eff size: {self.b_eff.size()}")
+            output = input * self.w_eff + self.b_eff
+            return output
 
 # class NoisyLinearQ(NoisyLinear):
 #     _FLOAT_MODULE = NoisyLinear

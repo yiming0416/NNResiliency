@@ -104,53 +104,12 @@ if use_cuda:
 
 ###################################################
 print('\n[Phase 1] : Data Preparation')
-transform_train_CIFAR = transforms.Compose([
-    transforms.RandomCrop(32, padding=4),
-    transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),
-    transforms.Normalize(cf.mean[args.dataset], cf.std[args.dataset]),
-]) # meanstd transformation
-
-transform_train_MNIST = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize(cf.mean[args.dataset], cf.std[args.dataset]),
-]) # meanstd transformation
-
-transform_test_CIFAR = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize(cf.mean[args.dataset], cf.std[args.dataset]),
-])
-
-transform_test_MNIST = transforms.Compose([
-    # transforms.Pad(padding=2, fill=0),
-    transforms.ToTensor(),
-    transforms.Normalize(cf.mean[args.dataset], cf.std[args.dataset]),
-])
-
 start_epoch, num_epochs, batch_size, optim_type = cf.start_epoch, args.num_epochs, args.batch_size, args.optim_type
 
-if(args.dataset == 'cifar10'):
-    print("| Preparing CIFAR-10 dataset...")
-    sys.stdout.write("| ")
-    trainset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train_CIFAR)
-    testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_test_CIFAR)
-    num_classes = 10
-elif(args.dataset == 'cifar100'):
-    print("| Preparing CIFAR-100 dataset...")
-    sys.stdout.write("| ")
-    trainset = torchvision.datasets.CIFAR100(root='./data', train=True, download=True, transform=transform_train_CIFAR)
-    testset = torchvision.datasets.CIFAR100(root='./data', train=False, download=True, transform=transform_test_CIFAR)
-    num_classes = 100
-elif(args.dataset == 'mnist'):
-    print("| Preparing MNIST dataset...")
-    sys.stdout.write("| ")
-    trainset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=transform_train_MNIST)
-    testset = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=transform_test_MNIST)
-    num_classes = 10
+trainset, testset, num_classes = getDatasets(args.dataset)
 
 trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=0)
 testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False, num_workers=0)
-
 
 #####################################################
 print('\n[Phase 2] : Model setup')
