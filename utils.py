@@ -3,6 +3,7 @@ import config as cf
 import torchvision
 import torchvision.transforms as transforms
 import sys
+import os, shutil
 
 def getDatasets(dataset: str):
     transform_train_CIFAR = transforms.Compose([
@@ -101,3 +102,22 @@ def getNetwork(args, num_classes):
 
     return net, file_name
 
+def create_or_clear_dir(path, force=False):
+    if not os.path.exists(path):
+        os.makedirs(path)
+    elif os.path.isdir(path):
+        for filename in os.listdir(path):
+            file_path = os.path.join(path, filename)
+            # try:
+            if os.path.isfile(file_path) or os.path.islink(file_path):
+                os.unlink(file_path)
+            elif os.path.isdir(file_path):
+                shutil.rmtree(file_path)
+            # except Exception as e:
+                # print('Failed to delete %s. Reason: %s' % (file_path, e))
+    else:
+        if force:
+            os.unlink(path)
+            os.makedirs(path)
+        else:
+            raise NotADirectoryError("f{path} is a file")
