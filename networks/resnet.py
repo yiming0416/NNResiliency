@@ -108,6 +108,7 @@ class Bottleneck(nn.Module):
             out = self.dropout(out)
         out += self.downsample(x)
         out = F.relu(out)
+        out = self.out_quant(out)
 
         return out
 

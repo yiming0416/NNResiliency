@@ -380,7 +380,7 @@ for epoch in range(start_epoch, start_epoch+num_epochs):
     net_test.to(device)
     checkpoint_file = './checkpoint/'+args.dataset+'/'+args.training_noise_type+'/'+file_name + '_current.pkl'
     checkpoint = torch.load(checkpoint_file)
-    test_acc_df = test_with_std_mean(net_test, checkpoint, epoch = epoch, test_std_list=args.testing_noise, test_mean_list=args.testing_noise_mean, sample_num=1, writer=writer)
+    test_acc_df = test_with_std_mean(net_test, checkpoint, epoch = epoch, test_std_list=args.testing_noise, test_mean_list=args.testing_noise_mean, test_quantization_levels=args.test_quantization_levels, sample_num=1, writer=writer)
 
     # TODO: not dealing with training & testing quant_level yet
     training_noise_stdev = args.training_noise[0] if args.training_noise is not None else 0
