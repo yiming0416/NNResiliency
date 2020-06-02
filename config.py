@@ -38,3 +38,14 @@ def get_hms(seconds):
     h, m = divmod(m, 60)
 
     return h, m, s
+
+# test parameters
+test_std_list = [0.0, 0.02, 0.04, 0.06, 0.08, 0.1, 0.12, 0.14, 0.16, 0.18, 0.2]
+#test_mean_list = [0.0]
+#test_mean_pos = [0.0]
+#test_mean_neg = [0.0]
+
+# test_mean_list = [-0.08, -0.06, -0.04, -0.02, -0.01, -0.004, 0.0, 0.004, 0.01, 0.02, 0.04 , 0.06, 0.08]
+test_mean_list = [-0.004, 0.0, 0.004]
+test_mean_pos = [0.0, 0.004, 0.01, 0.02, 0.04, 0.06, 0.08]
+test_mean_neg = [-0.08, -0.06, -0.04, -0.02, -0.01, -0.004, 0.0]

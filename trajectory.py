@@ -13,36 +13,47 @@ class TrajectoryLog():
         self.log_dir = log_dir
         if not os.path.isdir(self.log_dir):
             raise Exception("Log dir {} doesn't exist".format(self.log_dir))
-        self.index = self._make_index(os.listdir(self.log_dir))
+        self.index = self._make_index(self.log_dir, os.listdir(self.log_dir))
+        self.device = device
 
     def __getitem__(self, i):
         keys = None
-        values = []
-        for file in self.index[i]:
-            dictionary = torch.load(file)
+        def extract_value(file):
+            nonlocal keys
+            dictionary = torch.load(file, map_location=self.device)
             if keys is None:
                 keys = dictionary.keys()
             value = torch.cat(
                 [torch.stack([v.view(-1).float() for v in dictionary[k]]) # (# obs x len(param_k))
                  for k in keys], dim=1
             ) # (# obs x len(all_params))
-        values.append(value)
-        return values
+            return value
+        if isinstance(i, slice):
+            values = []
+            files = self.index[i]
+            for file in files:
+                values.append(extract_value(file))
+            return values
+        elif isinstance(i, int):
+            file = self.index[i]
+            return extract_value(file)
+        else:
+            raise TypeError("Invalid argument type.")
             
     def __len__(self):
         return len(self.index)
 
-    def _make_index(self, filename_list: Iterable) -> np.ndarray:
+    def _make_index(self, base:str, filename_list: Iterable) -> np.ndarray:
         regex = re.compile(r"^(\d+)\." + self.log_type + "$")
         index = []
         key = []
         for filename in filename_list:
-            fn = os.path.basename(filename)
-            match = regex.match(fn)
+            # fn = os.path.basename(filename)
+            match = regex.match(filename)
             if match is None:
                 continue
             else:
-                index.append(filename)
+                index.append(os.path.join(base, filename))
                 key.append(int(match.group(1)))
         return np.array(index)[np.argsort(key)]
 
@@ -76,7 +87,9 @@ class TrajectoryLogger():
         else:
             # create new empty buffer 
             # self.param_buffer[global_step] = {name: [] for name, _ in net.named_parameters()}, 
-            self.param_buffer[global_step] = OrderedDict.fromkeys(self.param_names, [])
+            self.param_buffer[global_step] = OrderedDict.fromkeys(self.param_names)
+            for name in self.param_buffer[global_step]:
+                self.param_buffer[global_step][name] = []
         # append current log
         for name, param in net.named_parameters():
             assert name in self.param_buffer[global_step]
@@ -94,7 +107,9 @@ class TrajectoryLogger():
         else:
             # create new empty buffer 
             # self.grad_buffer[global_step] = {name: [] for name, _ in net.named_parameters()}, 
-            self.grad_buffer[global_step] = OrderedDict.fromkeys(self.param_names, [])
+            self.grad_buffer[global_step] = OrderedDict.fromkeys(self.param_names)
+            for name in self.param_names:
+                self.grad_buffer[global_step][name] = []
         # append current log
         for name, param in net.named_parameters():
             assert name in self.grad_buffer[global_step]
