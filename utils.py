@@ -79,27 +79,31 @@ def getNetworkName(args):
 
 
 # Return network & file name
-def getNetwork(args, num_classes):
-    if args.net_type == 'lenet':
-        if args.dataset == 'mnist':
+def _get_network(net_type: str, depth: int, dropout_rate: float, dataset: str, num_classes: int,
+                 training_noise_type: str = "gaussian", training_noise: float = None):
+    if net_type == 'lenet':
+        if dataset == 'mnist':
             net = LeNet(num_classes, input_size=28, input_channel=1)
-        if args.dataset == 'cifar10':
+        if dataset == 'cifar10':
             net = LeNet(num_classes, input_size=32, input_channel=3)
-    if args.net_type == 'resnet':
-        if args.dataset == 'mnist':
-            net = ResNet(args.depth, num_classes, use_dropout = True, dropout_rate = args.dropout_rate, in_channel=1)
+    if net_type == 'resnet':
+        if dataset == 'mnist':
+            net = ResNet(depth, num_classes, use_dropout = True, dropout_rate = dropout_rate, in_channel=1)
         else:
-            net = ResNet(args.depth, num_classes, use_dropout = True, dropout_rate = args.dropout_rate, in_channel=3)
+            net = ResNet(depth, num_classes, use_dropout = True, dropout_rate = dropout_rate, in_channel=3)
 
-    if args.training_noise_type == 'gaussian' and args.training_noise is None:
+    if training_noise_type == 'gaussian' and training_noise is None:
         net.apply(set_gaussian_noise)
-    elif args.training_noise_type == 'uniform':
+    elif training_noise_type == 'uniform':
         net.apply(set_uniform_noise)
     else:
         net.apply(set_gaussian_noise)
+    return net
 
+def getNetwork(args, num_classes: int):
+    net = _get_network(args.net_type, args.depth, args.dropout_rate, args.dataset,
+                       num_classes, args.training_noise_type, args.training_noise)
     file_name = getNetworkName(args)
-
     return net, file_name
 
 def create_or_clear_dir(path, force=False):

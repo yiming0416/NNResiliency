@@ -12,6 +12,7 @@ def children_of_class(module, target_class):
 def num_parameters(model):
     return sum([w.numel() for w in model.parameters()])
 
+# TODO: move to utils
 def accuracy(output, target, topk=(1,)):
     """Computes the precision@k for the specified values of k"""
     maxk = max(topk)
@@ -27,6 +28,7 @@ def accuracy(output, target, topk=(1,)):
         res.append(correct_k.mul_(1.0 / batch_size))
     return res
 
+# TODO: move to utils
 class AverageMeter(object):
     """Computes and stores the average and current value"""
     def __init__(self):
