@@ -17,6 +17,7 @@ import random
 import networks
 from networks import *
 from utils import *
+from training_functions import *
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.tensorboard import SummaryWriter
 
@@ -26,32 +27,35 @@ import xlwt
 
 from itertools import product
 import pandas as pd
+from trajectory import TrajectoryLogger, TrajectoryLog
 
-parser = argparse.ArgumentParser(description='HA-SGD Training',
-                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+parser = argparse.ArgumentParser(
+    description='HA-SGD Training',
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    fromfile_prefix_chars='@'
+)
 parser.add_argument('--lr', default=0.01, type=float, help='learning_rate')
 parser.add_argument('--num_epochs', '-n', default=200, type=int, help='num_epochs')
 parser.add_argument('--epochs_lr_decay', '-a', default=60, type=int, help='epochs_for_lr_decay')
 parser.add_argument('--lr_decay_rate', default=0.2, type=float, help='lr_decay_rate')
 parser.add_argument('--batch_size', '-s', default=200, type=int, help='batch size')
-parser.add_argument('--net_type', default='resnet', type=str, help='model')
+parser.add_argument('--net_type', default='resnet', choices=['resnet', 'wide-resnet', 'lenet'], type=str, help='model')
 parser.add_argument('--depth', default=18, type=int, help='depth of model')
 parser.add_argument('--widen_factor', default=10, type=int, help='width of model')
 parser.add_argument('--dropout_rate', default=0.3, type=float, help='dropout_rate')
 parser.add_argument('--dataset', default='cifar10', type=str, choices=['cifar10', 'cifar100', 'mnist'], help='dataset = [cifar10/cifar100/mnist]')
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--testOnly', '-t', action='store_true', help='Test mode with the saved model')
-parser.add_argument('--test_sample_num', type=int, default=20, help='The number of test runs per setting')
+parser.add_argument('--test_sample_num', type=int, default=20, help='The number of test runs per setting in testOnly mode')
 parser.add_argument('--load_model', type=str, default=None, help='Specify the model .pkl to load for testing/resuming training')
-parser.add_argument('--training_noise', type=float, nargs='+', default=None, help='Set the training noise standard deviation')
-parser.add_argument('--testing_noise', type=float, nargs='+', default=None, help='Set the testing noise standard deviation')
-parser.add_argument('--testing_noise_mean_random_sign', action='store_true', help='Set the mean of the testing noise with random sign')
 parser.add_argument('--training_noise_type', type=str, default='gaussian', choices=['gaussian', 'uniform'], help='noise_type = [gaussian/uniform]')
 parser.add_argument('--testing_noise_type', type=str, default='gaussian', choices=['gaussian', 'uniform'], help='noise_type = [gaussian/uniform]')
 
-#add new arguments to accept training_noise_mean and testing_noise_mean
+parser.add_argument('--training_noise', type=float, nargs='+', default=None, help='Set the training noise standard deviation')
+parser.add_argument('--testing_noise', type=float, nargs='+', default=None, help='Set the testing noise standard deviation')
 parser.add_argument('--training_noise_mean', type=float, nargs='+', default=None, help='Set the mean of the training noise')
-parser.add_argument('--testing_noise_mean', type=float, nargs='+', default=None, help='Set the mean of the testing noise')
+parser.add_argument('--testing_noise_mean', type=float, nargs='+', default=None, help='Set the mean of the testing noise in addition to the training mean')
+parser.add_argument('--testing_noise_mean_random_sign', action='store_true', help='Set the mean of the testing noise with random sign')
 
 parser.add_argument('--forward_samples', default=1, type=int, help='multi samples during forward')
 parser.add_argument('--tensorboard', action='store_true', help='Turn on the tensorboard monitoring')
@@ -65,10 +69,11 @@ parser.add_argument('--momentum', default=0.9, type=float, help='Set the momentu
 parser.add_argument('--nesterov', action='store_true', help='Use Nesterov momentum')
 parser.add_argument('--run_name', help='The name of this run (used for tensorboard)', type=str, default=None)
 
-parser.add_argument('--test_with_std', action='store_true', help="fix mean, change std while testing")
-parser.add_argument('--test_with_mean', action='store_true', help="fix std, change mean while testing")
+# parser.add_argument('--test_with_std', action='store_true', help="fix mean, change std while testing")
+# parser.add_argument('--test_with_mean', action='store_true', help="fix std, change mean while testing")
 
-# parser.add_argument('--test_with_quantization', action='store_true', help="Test model with its quantized version")
+parser.add_argument('--trajectory_dir', type=str, default=None, help='Set the directory for trajectory log')
+parser.add_argument('--trajectory_interval', type=int, default=10, help='Set the interval of trajectory logging')
 parser.add_argument('--test_quantization_levels', type=int, nargs='+', default=None, help="The levels of quantization during testing")
 
 if __name__ != "__main__":
@@ -76,15 +81,30 @@ if __name__ != "__main__":
 
 args = parser.parse_args()
 
-test_std_list = [0.0, 0.02, 0.04, 0.06, 0.08, 0.1, 0.12, 0.14, 0.16, 0.18, 0.2]
-#test_mean_list = [0.0]
-#test_mean_pos = [0.0]
-#test_mean_neg = [0.0]
+# FIXME: this is assuming that `args.training_noise` always has only one element, and that `args.testing_noise` is a list of scalars
+# FIXME: this is assuming that `args.training_noise_mean` always has only one element, and that `args.testing_noise_mean` is a list of scalars
 
-# test_mean_list = [-0.08, -0.06, -0.04, -0.02, -0.01, -0.004, 0.0, 0.004, 0.01, 0.02, 0.04 , 0.06, 0.08]
-test_mean_list = [-0.004, 0.0, 0.004]
-test_mean_pos = [0.0, 0.004, 0.01, 0.02, 0.04, 0.06, 0.08]
-test_mean_neg = [-0.08, -0.06, -0.04, -0.02, -0.01, -0.004, 0.0]
+if args.testing_noise is None:
+    args.testing_noise = [None]
+if args.training_noise is None:
+    args.training_noise = [None]
+if args.training_noise_mean is None:
+    args.training_noise_mean = [None]
+if args.testing_noise_mean is None:
+    args.testing_noise_mean = [None]
+
+args.testing_noise = list(set(args.testing_noise + [args.training_noise[0]]))
+args.testing_noise_mean = list(set(args.testing_noise_mean + [args.training_noise_mean[0]]))
+
+# test_std_list = [0.0, 0.02, 0.04, 0.06, 0.08, 0.1, 0.12, 0.14, 0.16, 0.18, 0.2]
+# #test_mean_list = [0.0]
+# #test_mean_pos = [0.0]
+# #test_mean_neg = [0.0]
+
+# # test_mean_list = [-0.08, -0.06, -0.04, -0.02, -0.01, -0.004, 0.0, 0.004, 0.01, 0.02, 0.04 , 0.06, 0.08]
+# test_mean_list = [-0.004, 0.0, 0.004]
+# test_mean_pos = [0.0, 0.004, 0.01, 0.02, 0.04, 0.06, 0.08]
+# test_mean_neg = [-0.08, -0.06, -0.04, -0.02, -0.01, -0.004, 0.0]
 
 # Set random seeds
 random.seed(args.seed)
@@ -104,7 +124,8 @@ if use_cuda:
 
 ###################################################
 print('\n[Phase 1] : Data Preparation')
-start_epoch, num_epochs, batch_size, optim_type = cf.start_epoch, args.num_epochs, args.batch_size, args.optim_type
+# start_epoch, num_epochs, batch_size, optim_type = cf.start_epoch, args.num_epochs, args.batch_size, args.optim_type
+start_epoch, num_epochs, batch_size, optim_type = 0, args.num_epochs, args.batch_size, args.optim_type
 
 trainset, testset, num_classes = getDatasets(args.dataset)
 
@@ -125,7 +146,7 @@ if use_cuda:
     net.cuda(device=device)
     cudnn.benchmark = True
 
-def train(net, epoch, optimizer, tensorboard_writer=None, clipper=None):
+def train(net, epoch, optimizer, tensorboard_writer=None, clipper=None, trajectory_logger: TrajectoryLogger=None):
     net.train()
     net.apply(set_noisy)
 
@@ -146,6 +167,10 @@ def train(net, epoch, optimizer, tensorboard_writer=None, clipper=None):
             train_loss.update(loss.item(), inputs.size(0))
             loss.backward()
             optimizer.step()
+            if trajectory_logger is not None:
+                trajectory_logger.add_param_log(net, global_step)
+                trajectory_logger.add_grad_log(net, global_step)
+                trajectory_logger.commit()
         else:
             pass
 
@@ -186,62 +211,6 @@ def test(net, epoch, dataloader):
     print("\n| Validation Epoch #{:d}\t\t\tLoss: {:.4f} Acc@1: {:.2%}".format(epoch, loss.item(), acc.avg))
 
     return acc.avg, acc5.avg
-
-
-def prepare_network_perturbation(
-        net, noise_type: str = 'gaussian', fixtest: bool = False,
-        perturbation_level: float = None, perturbation_mean: float = None):
-    """Set the perturbation and quantization of the network in-place
-    """
-    if noise_type == 'gaussian':
-        net.apply(set_gaussian_noise)
-        if isinstance(net, nn.DataParallel):
-            net.module.set_sigma_list(perturbation_level)
-            net.module.set_mu_list(perturbation_mean)
-        else:
-            net.set_sigma_list(perturbation_level)
-            net.set_mu_list(perturbation_mean)
-    elif noise_type == 'uniform':
-        net.apply(set_uniform_noise)
-        if isinstance(net, nn.DataParallel):
-            net.module.set_sigma_list(1)
-        else:
-            net.set_sigma_list(1)
-
-    if fixtest:
-        net.apply(set_fixtest)
-
-
-def prepare_network_quantization(
-        net, num_quantization_levels: int, calibration_dataloader: torch.utils.data.DataLoader,
-        qat: bool = False, num_calibration_batchs: int = 10):
-        # The last two arguments are redundant for now
-    if num_quantization_levels is None:
-        return
-    # Specify quantization configuration
-    net.set_quantization_level(num_quantization_levels)
-    net.enable_quantization()
-    # Calibrate with the test set TODO: use the training set to calibrate
-    test(net, -1, calibration_dataloader)
-    print('Post Training Quantization: Calibration done')
-    net.apply(disable_observer)
-    # net.qconfig = get_qconfig(num_quantization_levels)
-    # print('Quantization Config:', net.qconfig)
-    # if qat:
-    #     torch.quantization.prepare_qat(net, inplace=True)
-    #     test(net, -1, calibration_dataloader)
-    # else:
-    #     torch.quantization.prepare(net, inplace=True)
-    #     # Calibrate first
-    #     print('Post Training Quantization Prepare: Inserting Observers')
-
-    #     # Calibrate with the test set TODO: use the training set to calibrate
-    #     test(net, -1, calibration_dataloader)
-    #     print('Post Training Quantization: Calibration done')
-
-    #     # Convert to quantized model
-    #     torch.quantization.convert(net, inplace=True)
-    #     print('Post Training Quantization: Convert done')
 
 def test_with_std_mean(net, checkpoint, epoch = 0, test_mean_list=[None],
                        test_std_list=[None], test_quantization_levels=[None],
@@ -359,6 +328,11 @@ best_acc_2 = 0
 elapsed_time = 0
 save_point = os.path.join('checkpoint', args.dataset, args.training_noise_type)
 
+if args.trajectory_dir is not None:
+    trajectory_logger = TrajectoryLogger(net, args.trajectory_dir, args.trajectory_interval)
+else:
+    trajectory_logger = None
+
 for epoch in range(start_epoch, start_epoch+num_epochs):
     start_time = time.time()
     # train
@@ -368,7 +342,7 @@ for epoch in range(start_epoch, start_epoch+num_epochs):
             perturbation_level=args.training_noise, perturbation_mean=args.training_noise_mean
         )
 
-        train_acc, train_acc_5, train_loss = train(net, epoch, optimizer, tensorboard_writer=writer)
+        train_acc, train_acc_5, train_loss = train(net, epoch, optimizer, tensorboard_writer=writer, trajectory_logger=trajectory_logger)
         scheduler.step()
     elif args.optim_type == "EntropySGD":
         pass
@@ -380,7 +354,7 @@ for epoch in range(start_epoch, start_epoch+num_epochs):
     net_test.to(device)
     checkpoint_file = './checkpoint/'+args.dataset+'/'+args.training_noise_type+'/'+file_name + '_current.pkl'
     checkpoint = torch.load(checkpoint_file)
-    test_acc_df = test_with_std_mean(net_test, checkpoint, epoch = epoch, test_std_list=args.testing_noise, test_mean_list=args.testing_noise_mean, test_quantization_levels=args.test_quantization_levels, sample_num=1, writer=writer)
+    test_acc_df = test_with_std_mean(net_test, checkpoint, epoch = epoch, test_std_list=args.testing_noise, test_mean_list=args.testing_noise_mean, sample_num=1, writer=writer)
 
     # TODO: not dealing with training & testing quant_level yet
     training_noise_stdev = args.training_noise[0] if args.training_noise is not None else 0

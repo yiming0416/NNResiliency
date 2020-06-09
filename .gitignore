@@ -3,7 +3,8 @@ __pycache__
 checkpoint
 data
 tensorboard_dir
-trajectory/
+trajectory-data/
 test
 *.bak
 *.png
+*.swp
