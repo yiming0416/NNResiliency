@@ -29,6 +29,8 @@ from itertools import product
 import pandas as pd
 from trajectory import TrajectoryLogger, TrajectoryLog
 
+all_start_time = datetime.datetime.now()
+
 parser = argparse.ArgumentParser(
     description='HA-SGD Training',
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -75,6 +77,7 @@ parser.add_argument('--run_name', help='The name of this run (used for tensorboa
 parser.add_argument('--trajectory_dir', type=str, default=None, help='Set the directory for trajectory log')
 parser.add_argument('--trajectory_interval', type=int, default=10, help='Set the interval of trajectory logging')
 parser.add_argument('--test_quantization_levels', type=int, nargs='+', default=None, help="The levels of quantization during testing")
+parser.add_argument('--test_quantize_weights', action="store_true", help="Also quantize the weights with the specified quantization_levels")
 
 if __name__ != "__main__":
     sys.exit(1)
@@ -146,6 +149,15 @@ if use_cuda:
     net.cuda(device=device)
     cudnn.benchmark = True
 
+def network_constructor():
+    net, file_name = getNetwork(args, num_classes=num_classes)
+    if use_cuda:
+        if torch.cuda.device_count() > 1 and len(args.device) > 1:
+            net = torch.nn.DataParallel(net, device_ids=range(torch.cuda.device_count()))
+        net.cuda(device=device)
+        cudnn.benchmark = True
+    return net
+
 def train(net, epoch, optimizer, tensorboard_writer=None, clipper=None, trajectory_logger: TrajectoryLogger=None):
     net.train()
     net.apply(set_noisy)
@@ -212,8 +224,8 @@ def test(net, epoch, dataloader):
 
     return acc.avg, acc5.avg
 
-def test_with_std_mean(net, checkpoint, epoch = 0, test_mean_list=[None],
-                       test_std_list=[None], test_quantization_levels=[None],
+def test_with_std_mean(network_constructor: Callable, checkpoint, epoch = 0, test_mean_list=[None],
+                       test_std_list=[None], test_quantization_levels=[None], quantize_weights: bool=False,
                        sample_num=1, writer=None):
     if test_std_list is None:
         test_std_list = [None]
@@ -224,6 +236,7 @@ def test_with_std_mean(net, checkpoint, epoch = 0, test_mean_list=[None],
     results = []
     for stdev, mean, quant_levels in product(test_std_list, test_mean_list, test_quantization_levels):
         def prepare_and_test():
+            net = network_constructor()
             net.load_state_dict(checkpoint['state_dict'], strict=False)
             if use_cuda:
                 net.to(device)
@@ -232,7 +245,10 @@ def test_with_std_mean(net, checkpoint, epoch = 0, test_mean_list=[None],
             net.eval()
             net.apply(set_noisy)
             prepare_network_perturbation(net=net, noise_type=args.testing_noise_type, fixtest=True, perturbation_level=stdev, perturbation_mean=mean)
-            prepare_network_quantization(net=net, num_quantization_levels=quant_levels, calibration_dataloader=trainloader, qat=False)
+            if quantize_weights:
+                quantize_network(net=net, num_quantization_levels=quant_levels, calibration_dataloader=trainloader)
+            else:
+                prepare_network_quantization(net=net, num_quantization_levels=quant_levels, calibration_dataloader=trainloader, qat=False)
             test_acc, test_acc_5 = test(net, epoch, testloader)
             if args.tensorboard and writer is not None:
                 # TODO: the proper value of the global_step?
@@ -283,6 +299,7 @@ def save_model(net, save_point, args, metric = 1, stats_dict: dict=None):
 if args.testOnly:
     print ('\n Test Only Mode')
     assert os.path.isdir('checkpoint'), 'Error: No checkpoint directory found!'
+    del net
     if args.load_model:
         checkpoint_file = args.load_model
     else:
@@ -290,11 +307,14 @@ if args.testOnly:
     checkpoint = torch.load(checkpoint_file)
 
     test_acc_df = test_with_std_mean(
-        net, checkpoint, test_mean_list=args.testing_noise_mean,
+        network_constructor, checkpoint, test_mean_list=args.testing_noise_mean,
         test_std_list=args.testing_noise,
         test_quantization_levels=args.test_quantization_levels,
-        sample_num=args.test_sample_num
+        sample_num=args.test_sample_num,
+        quantize_weights=args.test_quantize_weights
     )
+
+    test_acc_df["start_time"] = all_start_time
 
     with open(os.path.join('test', file_name + '_metric1.test'), 'a') as f:
         f.write('\n')
@@ -350,11 +370,11 @@ for epoch in range(start_epoch, start_epoch+num_epochs):
         pass
     save_model(net, save_point, args, 0)
     # test
-    net_test, _ = getNetwork(args, num_classes)
-    net_test.to(device)
+    # net_test, _ = getNetwork(args, num_classes)
+    # net_test.to(device)
     checkpoint_file = './checkpoint/'+args.dataset+'/'+args.training_noise_type+'/'+file_name + '_current.pkl'
     checkpoint = torch.load(checkpoint_file)
-    test_acc_df = test_with_std_mean(net_test, checkpoint, epoch = epoch, test_std_list=args.testing_noise, test_mean_list=args.testing_noise_mean, sample_num=1, writer=writer)
+    test_acc_df = test_with_std_mean(network_constructor, checkpoint, epoch = epoch, test_std_list=args.testing_noise, test_mean_list=args.testing_noise_mean, sample_num=1, writer=writer)
 
     # TODO: not dealing with training & testing quant_level yet
     training_noise_stdev = args.training_noise[0] if args.training_noise is not None else 0

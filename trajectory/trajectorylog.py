@@ -57,6 +57,12 @@ class TrajectoryLog():
                 key.append(int(match.group(1)))
         return np.array(index)[np.argsort(key)]
 
+def load_net_from_param_log(net: torch.nn.Module, param_log_path: str):
+    param_dict = torch.load(param_log_path)
+    for name, param in net.named_parameters():
+        param_data = param_dict[name][0]
+        param.data.copy_(param_data)
+
 def set_model_params_from_vec(net: torch.nn.Module, param_vector: torch.Tensor):
     idx = 0
     for name, param in net.named_parameters():

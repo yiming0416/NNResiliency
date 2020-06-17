@@ -50,7 +50,7 @@ class BasicBlock(nn.Module):
         self.bn1 = NoisyBN(planes)
         self.conv2 = conv3x3(planes, planes)
         self.bn2 = NoisyBN(planes)
-        self.out_quant = get_activation_quant(quantization_levels, enable=False)() # must call the builder to build an instance
+        self.out_quant = get_activation_quant(quantization_levels, enable=False) # must call the builder to build an instance
         
         if stride != 1 or in_planes != self.expansion * planes:
             self.downsample = nn.Sequential(

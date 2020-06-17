@@ -5,6 +5,9 @@ data
 tensorboard_dir
 trajectory-data/
 test
-*.bak
+*.bak*
 *.png
 *.swp
+pics
+*.csv
+*.xlsx
