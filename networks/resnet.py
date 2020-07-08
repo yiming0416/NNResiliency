@@ -50,7 +50,7 @@ class BasicBlock(nn.Module):
         self.bn1 = NoisyBN(planes)
         self.conv2 = conv3x3(planes, planes)
         self.bn2 = NoisyBN(planes)
-        self.out_quant = get_activation_quant(quantization_levels, enable=False) # must call the builder to build an instance
+        self.out_quant = get_activation_quant(quantization_levels, enable=False)
         
         if stride != 1 or in_planes != self.expansion * planes:
             self.downsample = nn.Sequential(
@@ -176,11 +176,11 @@ class ResNet(nn.Module):
     def enable_quantization(self, flag: bool=True) -> None:
         for quant in children_of_class(self, CustomFakeQuantize):
             if flag:
-                enable_fake_quant(quant)
-                # enable_observer(quant)
+                quant.enable_fake_quant()
+                # quant.enable_observer()
             else:
-                disable_fake_quant(quant)
-                # disable_observer(quant)
+                quant.disable_fake_quant()
+                # quant.disable_observer()
 
     def set_quantization_level(self, quantization_levels: int) -> None:
         for quant in children_of_class(self, CustomFakeQuantize):

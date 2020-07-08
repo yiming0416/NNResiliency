@@ -40,7 +40,7 @@ def prepare_network_quantization(
         return
     # Specify quantization configuration
     net.set_quantization_level(num_quantization_levels)
-    net.enable_quantization()
+    net.enable_quantization(False)
     # Calibrate with the test set
     net.eval()
     device = next(net.parameters()).device
@@ -50,7 +50,9 @@ def prepare_network_quantization(
                 device=device), targets.to(device=device)
             outputs = net(inputs)
     print('Post Training Quantization: Calibration done')
-    net.apply(disable_observer)
+    net.enable_quantization()
+    for quant in children_of_class(net, CustomFakeQuantize):
+        quant.disable_observer()
 
 
 def quantize_network(net: nn.Module, num_quantization_levels: int, calibration_dataloader: torch.utils.data.DataLoader):

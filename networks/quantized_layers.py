@@ -18,6 +18,7 @@ from torch.nn.utils import fuse_conv_bn_weights
 import torch.nn.intrinsic.qat as nniqat
 from .noisy_layers import cal_range
 
+
 def _quantize_weight(float_wt, observer):
     wt_scale, wt_zp = observer.calculate_qparams()
     if observer.qscheme in [torch.per_tensor_symmetric, torch.per_tensor_affine]:
@@ -32,6 +33,7 @@ def _quantize_weight(float_wt, observer):
     else:
         raise ValueError("Unexpected qscheme " + observer.qscheme)
     return qweight
+
 
 class Linear(torch.nn.Linear):
     r"""
@@ -63,7 +65,8 @@ class Linear(torch.nn.Linear):
     _FLOAT_MODULE = nn.Linear
 
     def __init__(self, in_features, out_features, bias_=True, dtype=torch.qint8):
-        super(Linear, self).__init__(in_features=in_features, out_features=out_features, bias=bias_)
+        super(Linear, self).__init__(in_features=in_features,
+                                     out_features=out_features, bias=bias_)
         # We don't muck around with buffers or attributes or anything here
         # to keep the module simple. *everything* is simply a Python attribute.
         # Serialization logic is explicitly handled in the below serialization and
@@ -84,6 +87,8 @@ class Linear(torch.nn.Linear):
 
         self.scale = 1.0
         self.zero_point = 0
+        self.quant_min = -128
+        self.quant_max = 127
 
     def _get_name(self):
         return 'QuantizedLinear'
@@ -124,7 +129,11 @@ class Linear(torch.nn.Linear):
     def forward(self, x):
         # return torch.ops.quantized.linear(
         #     x, self._packed_params._packed_params, self.scale, self.zero_point)
-        return F.linear(x, self.weight, self.bias)
+        return torch.fake_quantize_per_tensor_affine(
+            F.linear(x, self.weight, self.bias),
+            scale=self.scale, zero_point=self.zero_point,
+            quant_min=self.quant_min, quant_max=self.quant_max
+        )
 
     # ===== Serialization methods =====
     # The special consideration here is that we have to unpack the weights into their
@@ -199,7 +208,8 @@ class Linear(torch.nn.Linear):
         """
         assert type(mod) == cls._FLOAT_MODULE, ' nnq.' + cls.__name__ + '.from_float only works for ' + \
             cls._FLOAT_MODULE.__name__
-        assert hasattr(mod, 'qconfig'), 'Input float module must have qconfig defined'
+        assert hasattr(
+            mod, 'qconfig'), 'Input float module must have qconfig defined'
         if type(mod) == nni.LinearReLU:
             activation_post_process = mod[1].activation_post_process
             mod = mod[0]
@@ -213,17 +223,22 @@ class Linear(torch.nn.Linear):
         act_scale, act_zp = activation_post_process.calculate_qparams()
         # assert dtype == torch.qint8, 'Weight observer must have dtype torch.qint8'
         # TODO: explicitly change to quantize per tensor
-        qweight = _quantize_weight(mod.weight.float(), weight_post_process).dequantize()
+        qweight = _quantize_weight(
+            mod.weight.float(), weight_post_process).dequantize()
         if mod.bias is not None:
             bias_post_process = mod.qconfig.weight()
             bias_post_process(mod.bias)
-            qbias = _quantize_weight(mod.bias.float(), bias_post_process).dequantize()
+            qbias = _quantize_weight(
+                mod.bias.float(), bias_post_process).dequantize()
 
         qlinear = cls(mod.in_features, mod.out_features, dtype=dtype)
         qlinear.set_weight_bias(qweight, qbias)
         qlinear.scale = float(act_scale)
         qlinear.zero_point = int(act_zp)
+        qlinear.quant_min = activation_post_process.qmin
+        qlinear.quant_max = activation_post_process.qmax
         return qlinear
+
 
 class _ConvNd(nn.modules.conv._ConvNd):
 
@@ -264,6 +279,8 @@ class _ConvNd(nn.modules.conv._ConvNd):
         # self.set_weight_bias(qweight, bias_float)
         self.scale = 1.0
         self.zero_point = 0
+        self.quant_min = -128
+        self.quant_max = 127
 
     def extra_repr(self):
         s = ('{in_channels}, {out_channels}, kernel_size={kernel_size}'
@@ -294,7 +311,8 @@ class _ConvNd(nn.modules.conv._ConvNd):
     #   |--- _packed_params : Conv2dPackedParamsBase or Conv3dPackedParamsBase
     def _save_to_state_dict(self, destination, prefix, keep_vars):
         # pylint: disable=not-callable
-        super(_ConvNd, self)._save_to_state_dict(destination, prefix, keep_vars)
+        super(_ConvNd, self)._save_to_state_dict(
+            destination, prefix, keep_vars)
         (w, b) = self._weight_bias()
         destination[prefix + 'weight'] = w
         destination[prefix + 'bias'] = b
@@ -365,6 +383,7 @@ class _ConvNd(nn.modules.conv._ConvNd):
     #     self.zero_point = state[13]
     #     self.training = state[14]
 
+
 class _OrdinaryConvNd(_ConvNd):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -385,24 +404,29 @@ class _OrdinaryConvNd(_ConvNd):
 
         qbias = mod.bias
 
-        activation_post_process = mod.activation_post_process
+        # activation_post_process = mod.activation_post_process
         weight_post_process = mod.qconfig.weight()
         weight_post_process(mod.weight)
         act_scale, act_zp = mod.activation_post_process.calculate_qparams()
         # assert weight_post_process.dtype == torch.qint8, 'Weight observer must have a dtype of qint8'
-        qweight = _quantize_weight(mod.weight.float(), weight_post_process).dequantize()
+        qweight = _quantize_weight(
+            mod.weight.float(), weight_post_process).dequantize()
         if mod.bias is not None:
             bias_post_process = mod.qconfig.weight()
             bias_post_process(mod.bias)
-            qbias = _quantize_weight(mod.bias.float(), bias_post_process).dequantize()
+            qbias = _quantize_weight(
+                mod.bias.float(), bias_post_process).dequantize()
         qconv = cls(mod.in_channels, mod.out_channels, mod.kernel_size,
                     mod.stride, mod.padding, mod.dilation, mod.groups,
                     mod.bias is not None, mod.padding_mode)
         qconv.set_weight_bias(qweight, qbias)
         qconv.scale = float(act_scale)
         qconv.zero_point = int(act_zp)
+        qconv.quant_min = mod.activation_post_process.qmin
+        qconv.quant_max = mod.activation_post_process.qmax
 
         return qconv
+
 
 class Conv1d(_OrdinaryConvNd, _ConvNd):
     r"""Applies a 1D convolution over a quantized input signal composed of
@@ -471,11 +495,18 @@ class Conv1d(_OrdinaryConvNd, _ConvNd):
             raise ValueError("Input shape must be `(N, C, L)`!")
         # return ops.quantized.conv1d(input, self._packed_params, self.scale, self.zero_point)
         if self.padding_mode != 'zeros':
-            return F.conv1d(F.pad(input, self._reversed_padding_repeated_twice, mode=self.padding_mode),
-                            self.weight, self.bias, self.stride,
-                            _single(0), self.dilation, self.groups)
-        return F.conv1d(input, self.weight, self.bias, self.stride,
-                        self.padding, self.dilation, self.groups)
+            out = F.conv1d(F.pad(input, self._reversed_padding_repeated_twice, mode=self.padding_mode),
+                           self.weight, self.bias, self.stride,
+                           _single(0), self.dilation, self.groups)
+        else:
+            out = F.conv1d(input, self.weight, self.bias, self.stride,
+                           self.padding, self.dilation, self.groups)
+        return torch.fake_quantize_per_tensor_affine(
+            out,
+            scale=self.scale, zero_point=self.zero_point,
+            quant_min=self.quant_min, quant_max=self.quant_max
+        )
+
 
 class Conv2d(_OrdinaryConvNd, _ConvNd):
     r"""Applies a 2D convolution over a quantized input signal composed of
@@ -535,11 +566,19 @@ class Conv2d(_OrdinaryConvNd, _ConvNd):
         if len(input.shape) != 4:
             raise ValueError("Input shape must be `(N, C, H, W)`!")
         if self.padding_mode != 'zeros':
-            return F.conv2d(F.pad(input, self._reversed_padding_repeated_twice, mode=self.padding_mode),
-                            self.weight, self.bias, self.stride,
-                            _pair(0), self.dilation, self.groups)
-        return F.conv2d(input, self.weight, self.bias, self.stride,
-                        self.padding, self.dilation, self.groups)
+            out = F.conv2d(F.pad(input, self._reversed_padding_repeated_twice, mode=self.padding_mode),
+                           self.weight, self.bias, self.stride,
+                           _pair(0), self.dilation, self.groups)
+        else:
+            out = F.conv2d(input, self.weight, self.bias, self.stride,
+                           self.padding, self.dilation, self.groups)
+
+        return torch.fake_quantize_per_tensor_affine(
+            out,
+            scale=self.scale, zero_point=self.zero_point,
+            quant_min=self.quant_min, quant_max=self.quant_max
+        )
+
 
 class Conv3d(_OrdinaryConvNd, _ConvNd):
     r"""Applies a 3D convolution over a quantized input signal composed of
@@ -599,11 +638,18 @@ class Conv3d(_OrdinaryConvNd, _ConvNd):
         if len(input.shape) != 5:
             raise ValueError("Input shape must be `(N, C, D, H, W)`!")
         if self.padding_mode != 'zeros':
-            return F.conv3d(F.pad(input, self._reversed_padding_repeated_twice, mode=self.padding_mode),
-                            self.weight, self.bias, self.stride, _triple(0),
-                            self.dilation, self.groups)
-        return F.conv3d(input, self.weight, self.bias, self.stride,
-                        self.padding, self.dilation, self.groups)
+            out = F.conv3d(F.pad(input, self._reversed_padding_repeated_twice, mode=self.padding_mode),
+                           self.weight, self.bias, self.stride, _triple(0),
+                           self.dilation, self.groups)
+        else:
+            out = F.conv3d(input, self.weight, self.bias, self.stride,
+                           self.padding, self.dilation, self.groups)
+        return torch.fake_quantize_per_tensor_affine(
+            out,
+            scale=self.scale, zero_point=self.zero_point,
+            quant_min=self.quant_min, quant_max=self.quant_max
+        )
+
 
 class ReLU(torch.nn.ReLU):
     r"""Applies quantized rectified linear unit function element-wise:
@@ -628,6 +674,7 @@ class ReLU(torch.nn.ReLU):
         >>> input = torch.quantize_per_tensor(input, 1.0, 0, dtype=torch.qint32)
         >>> output = m(input)
     """
+
     def __init__(self, inplace=False):
         super(ReLU, self).__init__(inplace)
         self.inplace = inplace

@@ -80,7 +80,7 @@ def getNetworkName(args):
 
 # Return network & file name
 def _get_network(net_type: str, depth: int, dropout_rate: float, dataset: str, num_classes: int,
-                 training_noise_type: str = "gaussian", training_noise: float = None):
+                 widen_factor: int=1, training_noise_type: str = "gaussian", training_noise: float = None):
     if net_type == 'lenet':
         if dataset == 'mnist':
             net = LeNet(num_classes, input_size=28, input_channel=1)
@@ -91,6 +91,8 @@ def _get_network(net_type: str, depth: int, dropout_rate: float, dataset: str, n
             net = ResNet(depth, num_classes, use_dropout = True, dropout_rate = dropout_rate, in_channel=1)
         else:
             net = ResNet(depth, num_classes, use_dropout = True, dropout_rate = dropout_rate, in_channel=3)
+    if net_type == 'wide_resnet':
+        net = WideResNet(depth, widen_factor, dropout_rate, num_classes)
 
     if training_noise_type == 'gaussian' and training_noise is None:
         net.apply(set_gaussian_noise)
@@ -101,8 +103,9 @@ def _get_network(net_type: str, depth: int, dropout_rate: float, dataset: str, n
     return net
 
 def getNetwork(args, num_classes: int):
-    net = _get_network(args.net_type, args.depth, args.dropout_rate, args.dataset,
-                       num_classes, args.training_noise_type, args.training_noise)
+    net = _get_network(net_type=args.net_type, depth=args.depth, dropout_rate=args.dropout_rate,
+                       dataset=args.dataset, num_classes=num_classes, widen_factor=args.widen_factor,
+                       training_noise_type=args.training_noise_type, training_noise=args.training_noise)
     file_name = getNetworkName(args)
     return net, file_name
 

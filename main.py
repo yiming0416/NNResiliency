@@ -41,7 +41,7 @@ parser.add_argument('--num_epochs', '-n', default=200, type=int, help='num_epoch
 parser.add_argument('--epochs_lr_decay', '-a', default=60, type=int, help='epochs_for_lr_decay')
 parser.add_argument('--lr_decay_rate', default=0.2, type=float, help='lr_decay_rate')
 parser.add_argument('--batch_size', '-s', default=200, type=int, help='batch size')
-parser.add_argument('--net_type', default='resnet', choices=['resnet', 'wide-resnet', 'lenet'], type=str, help='model')
+parser.add_argument('--net_type', default='resnet', choices=['resnet', 'wide_resnet', 'lenet'], type=str, help='model')
 parser.add_argument('--depth', default=18, type=int, help='depth of model')
 parser.add_argument('--widen_factor', default=10, type=int, help='width of model')
 parser.add_argument('--dropout_rate', default=0.3, type=float, help='dropout_rate')
@@ -96,8 +96,9 @@ if args.training_noise_mean is None:
 if args.testing_noise_mean is None:
     args.testing_noise_mean = [None]
 
-args.testing_noise = list(set(args.testing_noise + [args.training_noise[0]]))
-args.testing_noise_mean = list(set(args.testing_noise_mean + [args.training_noise_mean[0]]))
+if not args.testOnly:
+    args.testing_noise = list(set(args.testing_noise + [args.training_noise[0]]))
+    args.testing_noise_mean = list(set(args.testing_noise_mean + [args.training_noise_mean[0]]))
 
 # test_std_list = [0.0, 0.02, 0.04, 0.06, 0.08, 0.1, 0.12, 0.14, 0.16, 0.18, 0.2]
 # #test_mean_list = [0.0]
@@ -304,6 +305,7 @@ if args.testOnly:
         checkpoint_file = args.load_model
     else:
         checkpoint_file = './checkpoint/'+args.dataset+'/'+args.training_noise_type+'/'+file_name + '_metric1.pkl'
+        print(f"checkpoint_file = {'./checkpoint/'+args.dataset+'/'+args.training_noise_type+'/'+file_name + '_metric1.pkl'}")
     checkpoint = torch.load(checkpoint_file)
 
     test_acc_df = test_with_std_mean(

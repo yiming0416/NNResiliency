@@ -24,8 +24,10 @@ class CustomFakeQuantize(FakeQuantize):
     def set_qmin_qmax(self, quant_min, quant_max):
         self.quant_min = quant_min
         self.quant_max = quant_max
+        device = next(self.activation_post_process.buffers()).device # need to preserve the device where the observer is
         self.activation_post_process = self.observer_cls() # need to re-initialize the observer
         self.activation_post_process.set_qmin_qmax(quant_min, quant_max)
+        self.activation_post_process.to(device)
 
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
